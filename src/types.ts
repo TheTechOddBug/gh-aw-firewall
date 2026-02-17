@@ -385,24 +385,27 @@ export interface WrapperConfig {
    * Enable API proxy sidecar for holding authentication credentials
    *
    * When true, deploys a Node.js proxy sidecar container that:
-   * - Holds OpenAI and Anthropic API keys securely
+   * - Holds OpenAI, Anthropic, and GitHub Copilot API keys securely
    * - Automatically injects authentication headers
    * - Routes all traffic through Squid to respect domain whitelisting
    * - Proxies requests to LLM providers
    *
-   * The sidecar exposes two endpoints accessible from the agent container:
+   * The sidecar exposes three endpoints accessible from the agent container:
    * - http://api-proxy:10000 - OpenAI API proxy (for Codex)
    * - http://api-proxy:10001 - Anthropic API proxy (for Claude)
+   * - http://api-proxy:10002 - GitHub Copilot API proxy
    *
    * When the corresponding API key is provided, the following environment
    * variables are set in the agent container:
    * - OPENAI_BASE_URL=http://api-proxy:10000/v1 (set when OPENAI_API_KEY is provided)
    * - ANTHROPIC_BASE_URL=http://api-proxy:10001 (set when ANTHROPIC_API_KEY is provided)
+   * - COPILOT_API_URL=http://api-proxy:10002 (set when COPILOT_GITHUB_TOKEN is provided)
    * - CLAUDE_CODE_API_KEY_HELPER=/usr/local/bin/get-claude-key.sh (set when ANTHROPIC_API_KEY is provided)
    *
    * API keys are passed via environment variables:
    * - OPENAI_API_KEY - Optional OpenAI API key for Codex
    * - ANTHROPIC_API_KEY - Optional Anthropic API key for Claude
+   * - COPILOT_GITHUB_TOKEN - Optional GitHub token for Copilot
    *
    * @default false
    * @example
@@ -410,7 +413,8 @@ export interface WrapperConfig {
    * # Enable API proxy with keys from environment
    * export OPENAI_API_KEY="sk-..."
    * export ANTHROPIC_API_KEY="sk-ant-..."
-   * awf --enable-api-proxy --allow-domains api.openai.com,api.anthropic.com -- command
+   * export COPILOT_GITHUB_TOKEN="ghp_..."
+   * awf --enable-api-proxy --allow-domains api.openai.com,api.anthropic.com,api.githubcopilot.com -- command
    * ```
    */
   enableApiProxy?: boolean;
@@ -438,6 +442,19 @@ export interface WrapperConfig {
    * @default undefined
    */
   anthropicApiKey?: string;
+
+  /**
+   * GitHub token for Copilot (used by API proxy sidecar)
+   *
+   * When enableApiProxy is true, this token is injected into the Node.js sidecar
+   * container and used to authenticate requests to api.githubcopilot.com.
+   *
+   * The token is NOT exposed to the agent container - only the proxy URL is provided.
+   * The agent receives a placeholder value that is protected by the one-shot-token library.
+   *
+   * @default undefined
+   */
+  copilotGithubToken?: string;
 }
 
 /**

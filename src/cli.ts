@@ -262,12 +262,14 @@ export interface ApiProxyValidationResult {
  * @param enableApiProxy - Whether --enable-api-proxy flag was provided
  * @param hasOpenaiKey - Whether an OpenAI API key is present
  * @param hasAnthropicKey - Whether an Anthropic API key is present
+ * @param hasCopilotKey - Whether a GitHub Copilot API key is present
  * @returns ApiProxyValidationResult with warnings and debug messages
  */
 export function validateApiProxyConfig(
   enableApiProxy: boolean,
   hasOpenaiKey?: boolean,
-  hasAnthropicKey?: boolean
+  hasAnthropicKey?: boolean,
+  hasCopilotKey?: boolean
 ): ApiProxyValidationResult {
   if (!enableApiProxy) {
     return { enabled: false, warnings: [], debugMessages: [] };
@@ -276,15 +278,18 @@ export function validateApiProxyConfig(
   const warnings: string[] = [];
   const debugMessages: string[] = [];
 
-  if (!hasOpenaiKey && !hasAnthropicKey) {
+  if (!hasOpenaiKey && !hasAnthropicKey && !hasCopilotKey) {
     warnings.push('⚠️  API proxy enabled but no API keys found in environment');
-    warnings.push('   Set OPENAI_API_KEY or ANTHROPIC_API_KEY to use the proxy');
+    warnings.push('   Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or COPILOT_GITHUB_TOKEN to use the proxy');
   }
   if (hasOpenaiKey) {
     debugMessages.push('OpenAI API key detected - will be held securely in sidecar');
   }
   if (hasAnthropicKey) {
     debugMessages.push('Anthropic API key detected - will be held securely in sidecar');
+  }
+  if (hasCopilotKey) {
+    debugMessages.push('GitHub Copilot API key detected - will be held securely in sidecar');
   }
 
   return { enabled: true, warnings, debugMessages };
@@ -987,6 +992,7 @@ program
       enableApiProxy: options.enableApiProxy,
       openaiApiKey: process.env.OPENAI_API_KEY,
       anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+      copilotGithubToken: process.env.COPILOT_GITHUB_TOKEN,
     };
 
     // Warn if --env-all is used
@@ -1025,8 +1031,15 @@ program
     const apiProxyValidation = validateApiProxyConfig(
       config.enableApiProxy || false,
       !!config.openaiApiKey,
-      !!config.anthropicApiKey
+      !!config.anthropicApiKey,
+      !!config.copilotGithubToken
     );
+
+    // Log API proxy status at info level for visibility
+    if (config.enableApiProxy) {
+      logger.info(`API proxy enabled: OpenAI=${!!config.openaiApiKey}, Anthropic=${!!config.anthropicApiKey}, Copilot=${!!config.copilotGithubToken}`);
+    }
+
     for (const warning of apiProxyValidation.warnings) {
       logger.warn(warning);
     }
@@ -1038,7 +1051,7 @@ program
     // to prevent sensitive data from flowing to logger (CodeQL sensitive data logging)
     const redactedConfig: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(config)) {
-      if (key === 'openaiApiKey' || key === 'anthropicApiKey') continue;
+      if (key === 'openaiApiKey' || key === 'anthropicApiKey' || key === 'copilotGithubToken') continue;
       redactedConfig[key] = key === 'agentCommand' ? redactSecrets(value as string) : value;
     }
     logger.debug('Configuration:', JSON.stringify(redactedConfig, null, 2));

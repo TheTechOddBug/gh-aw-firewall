@@ -91,6 +91,49 @@ if [ -n "$OPENAI_BASE_URL" ]; then
   fi
 fi
 
+# Check GitHub Copilot configuration
+if [ -n "$COPILOT_API_URL" ]; then
+  API_PROXY_CONFIGURED=true
+  echo "[health-check] Checking GitHub Copilot API proxy configuration..."
+  echo "[health-check] COPILOT_API_URL=$COPILOT_API_URL"
+
+  # Verify COPILOT_GITHUB_TOKEN is placeholder (protected by one-shot-token)
+  if [ -n "$COPILOT_GITHUB_TOKEN" ]; then
+    if [ "$COPILOT_GITHUB_TOKEN" != "placeholder-token-for-credential-isolation" ]; then
+      echo "[health-check][ERROR] COPILOT_GITHUB_TOKEN contains non-placeholder value!"
+      echo "[health-check][ERROR] Token should be 'placeholder-token-for-credential-isolation'"
+      exit 1
+    fi
+    echo "[health-check] ✓ COPILOT_GITHUB_TOKEN is placeholder value (correct)"
+  fi
+
+  # Verify COPILOT_TOKEN is placeholder (if present)
+  if [ -n "$COPILOT_TOKEN" ]; then
+    if [ "$COPILOT_TOKEN" != "placeholder-token-for-credential-isolation" ]; then
+      echo "[health-check][ERROR] COPILOT_TOKEN contains non-placeholder value!"
+      echo "[health-check][ERROR] Token should be 'placeholder-token-for-credential-isolation'"
+      exit 1
+    fi
+    echo "[health-check] ✓ COPILOT_TOKEN is placeholder value (correct)"
+  fi
+
+  # Perform health check using API URL
+  echo "[health-check] Testing connectivity to GitHub Copilot API proxy at $COPILOT_API_URL..."
+
+  # Extract host and port from API URL (format: http://IP:PORT)
+  PROXY_HOST=$(echo "$COPILOT_API_URL" | sed -E 's|^https?://([^:]+):.*|\1|')
+  PROXY_PORT=$(echo "$COPILOT_API_URL" | sed -E 's|^https?://[^:]+:([0-9]+).*|\1|')
+
+  # Test TCP connectivity with timeout
+  if timeout 5 bash -c "cat < /dev/null > /dev/tcp/$PROXY_HOST/$PROXY_PORT" 2>/dev/null; then
+    echo "[health-check] ✓ GitHub Copilot API proxy is reachable at $COPILOT_API_URL"
+  else
+    echo "[health-check][ERROR] Cannot connect to GitHub Copilot API proxy at $COPILOT_API_URL"
+    echo "[health-check][ERROR] Proxy may not be running or network is blocked"
+    exit 1
+  fi
+fi
+
 # Summary
 if [ "$API_PROXY_CONFIGURED" = "true" ]; then
   echo "[health-check] =========================================="
@@ -99,7 +142,7 @@ if [ "$API_PROXY_CONFIGURED" = "true" ]; then
   echo "[health-check] ✓ Connectivity established"
   echo "[health-check] =========================================="
 else
-  echo "[health-check] No API proxy configured (ANTHROPIC_BASE_URL and OPENAI_BASE_URL not set)"
+  echo "[health-check] No API proxy configured (ANTHROPIC_BASE_URL, OPENAI_BASE_URL, and COPILOT_API_URL not set)"
   echo "[health-check] Skipping health checks"
 fi
 
