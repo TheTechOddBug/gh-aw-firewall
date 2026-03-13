@@ -549,6 +549,12 @@ export function generateDockerCompose(
   // Only mount the workspace directory ($GITHUB_WORKSPACE or current working directory)
   // to prevent access to credential files in $HOME
   const workspaceDir = process.env.GITHUB_WORKSPACE || process.cwd();
+  // Create init-signal directory for iptables init container coordination
+  const initSignalDir = path.join(config.workDir, 'init-signal');
+  if (!fs.existsSync(initSignalDir)) {
+    fs.mkdirSync(initSignalDir, { recursive: true });
+  }
+
   const agentVolumes: string[] = [
     // Essential mounts that are always included
     '/tmp:/tmp:rw',
@@ -557,6 +563,8 @@ export function generateDockerCompose(
     `${workspaceDir}:${workspaceDir}:rw`,
     // Mount agent logs directory to workDir for persistence
     `${config.workDir}/agent-logs:${effectiveHome}/.copilot/logs:rw`,
+    // Init signal volume for iptables init container coordination
+    `${initSignalDir}:/tmp/awf-init:rw`,
   ];
 
   // Volume mounts for chroot /host to work properly with host binaries
@@ -945,13 +953,15 @@ export function generateDockerCompose(
         condition: 'service_healthy',
       },
     },
-    // NET_ADMIN is required for iptables setup in entrypoint.sh.
+    // SECURITY: NET_ADMIN is NOT granted to the agent container.
+    // iptables setup is performed by the awf-iptables-init service which shares
+    // the agent's network namespace via network_mode: "service:agent".
     // SYS_CHROOT is required for chroot operations.
     // SYS_ADMIN is required to mount procfs at /host/proc (required for
     // dynamic /proc/self/exe resolution needed by .NET CLR and other runtimes).
-    // Security: All capabilities are dropped before running user commands
-    // via 'capsh --drop=cap_net_admin,cap_sys_chroot,cap_sys_admin' in entrypoint.sh.
-    cap_add: ['NET_ADMIN', 'SYS_CHROOT', 'SYS_ADMIN'],
+    // Security: SYS_CHROOT and SYS_ADMIN are dropped before running user commands
+    // via 'capsh --drop=cap_sys_chroot,cap_sys_admin' in entrypoint.sh.
+    cap_add: ['SYS_CHROOT', 'SYS_ADMIN'],
     // Drop capabilities to reduce attack surface (security hardening)
     cap_drop: [
       'NET_RAW',      // Prevents raw socket creation (iptables bypass attempts)
@@ -976,6 +986,17 @@ export function generateDockerCompose(
     cpu_shares: 1024,          // Default CPU share
     stdin_open: true,
     tty: config.tty || false, // Use --tty flag, default to false for clean logs
+    // Healthcheck ensures the agent process is alive and its PID is visible in /proc
+    // before the iptables-init container tries to join via network_mode: service:agent.
+    // Without this, there's a race where the init container tries to look up the agent's
+    // PID in /proc/PID/ns/net before the kernel has made it visible.
+    healthcheck: {
+      test: ['CMD-SHELL', 'true'],
+      interval: '1s',
+      timeout: '1s',
+      retries: 3,
+      start_period: '1s',
+    },
     // Escape $ with $$ for Docker Compose variable interpolation
     command: ['/bin/bash', '-c', config.agentCommand.replace(/\$/g, '$$$$')],
   };
@@ -1040,10 +1061,75 @@ export function generateDockerCompose(
     agentService.image = agentImage;
   }
 
+  // Pre-set API proxy IP in environment before the init container definition.
+  // The init container's environment object captures values at definition time,
+  // so AWF_API_PROXY_IP must be set before the init container is defined.
+  // Without this, the init container gets an empty AWF_API_PROXY_IP and
+  // setup-iptables.sh never adds ACCEPT rules for the API proxy, blocking connectivity.
+  if (config.enableApiProxy && networkConfig.proxyIp) {
+    environment.AWF_API_PROXY_IP = networkConfig.proxyIp;
+  }
+
+  // SECURITY: iptables init container - sets up NAT rules in a separate container
+  // that shares the agent's network namespace but NEVER gives NET_ADMIN to the agent.
+  // This eliminates the window where the agent holds NET_ADMIN during startup.
+  const iptablesInitService: any = {
+    container_name: 'awf-iptables-init',
+    // Share agent's network namespace so iptables rules apply to agent's traffic
+    network_mode: 'service:agent',
+    // Only mount the init signal volume and the iptables setup script
+    volumes: [
+      `${initSignalDir}:/tmp/awf-init:rw`,
+    ],
+    environment: {
+      // Pass through environment variables needed by setup-iptables.sh
+      // IMPORTANT: setup-iptables.sh reads SQUID_PROXY_HOST/PORT (not AWF_ prefixed).
+      // Use the direct IP address since the init container (network_mode: service:agent)
+      // may not have DNS resolution for compose service names.
+      SQUID_PROXY_HOST: `${networkConfig.squidIp}`,
+      SQUID_PROXY_PORT: String(SQUID_PORT),
+      AWF_DNS_SERVERS: environment.AWF_DNS_SERVERS || '',
+      AWF_BLOCKED_PORTS: environment.AWF_BLOCKED_PORTS || '',
+      AWF_ENABLE_HOST_ACCESS: environment.AWF_ENABLE_HOST_ACCESS || '',
+      AWF_API_PROXY_IP: environment.AWF_API_PROXY_IP || '',
+      AWF_DOH_PROXY_IP: environment.AWF_DOH_PROXY_IP || '',
+      AWF_SSL_BUMP_ENABLED: environment.AWF_SSL_BUMP_ENABLED || '',
+      AWF_SSL_BUMP_INTERCEPT_PORT: environment.AWF_SSL_BUMP_INTERCEPT_PORT || '',
+    },
+    depends_on: {
+      'agent': {
+        condition: 'service_healthy',
+      },
+    },
+    // NET_ADMIN is required for iptables rule manipulation.
+    // NET_RAW is required by iptables for netfilter socket operations.
+    cap_add: ['NET_ADMIN', 'NET_RAW'],
+    cap_drop: ['ALL'],
+    // Override entrypoint to bypass the agent's entrypoint.sh, which contains an
+    // "init container wait" loop that would deadlock (the init container waiting for itself).
+    // The init container only needs to run setup-iptables.sh directly.
+    entrypoint: ['/bin/bash'],
+    // Run setup-iptables.sh then signal readiness; log output to shared volume for diagnostics
+    command: ['-c', '/usr/local/bin/setup-iptables.sh > /tmp/awf-init/output.log 2>&1 && touch /tmp/awf-init/ready'],
+    // Resource limits (init container exits quickly)
+    mem_limit: '128m',
+    pids_limit: 50,
+    // Restart policy: never restart (init container runs once)
+    restart: 'no',
+  };
+
+  // Use the same image/build as the agent container for the iptables init service
+  if (agentService.image) {
+    iptablesInitService.image = agentService.image;
+  } else if (agentService.build) {
+    iptablesInitService.build = agentService.build;
+  }
+
   // API Proxy sidecar service (Node.js) - optionally deployed
   const services: Record<string, any> = {
     'squid-proxy': squidService,
     'agent': agentService,
+    'iptables-init': iptablesInitService,
   };
 
   // Add Node.js API proxy sidecar if enabled
@@ -1491,7 +1577,7 @@ export async function startContainers(workDir: string, allowedDomains: string[],
   // This handles orphaned containers from failed/interrupted previous runs
   logger.debug('Removing any existing containers with conflicting names...');
   try {
-    await execa('docker', ['rm', '-f', 'awf-squid', 'awf-agent', 'awf-api-proxy'], {
+    await execa('docker', ['rm', '-f', 'awf-squid', 'awf-agent', 'awf-iptables-init', 'awf-api-proxy'], {
       reject: false,
     });
   } catch {
