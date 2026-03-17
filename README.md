@@ -1,16 +1,17 @@
 # Agentic Workflow Firewall
 
-A network firewall for agentic workflows with domain whitelisting. This tool provides L7 (HTTP/HTTPS) egress control using [Squid proxy](https://www.squid-cache.org/) and Docker containers, restricting network access to a whitelist of approved domains for AI agents and their MCP servers.
+A network firewall for agentic workflows that restricts outbound HTTP/HTTPS to an allowlist of domains.
 
 > [!TIP]
 > This project is a part of GitHub's explorations of [Agentic Workflows](https://github.com/github/gh-aw). For more background, check out the [project page](https://github.github.io/gh-aw/)! ✨
 
-## What it does
+## How it works
 
-- **L7 Domain Whitelisting**: Control HTTP/HTTPS traffic at the application layer
-- **Host-Level Enforcement**: Uses iptables DOCKER-USER chain to enforce firewall on ALL containers
-- **Chroot Mode**: Transparent access to host binaries (Python, Node.js, Go) while maintaining network isolation
-- **API Proxy Sidecar**: Optional Node.js-based proxy for secure LLM API credential management (OpenAI Codex, Anthropic Claude) that routes through Squid
+`awf` runs your command inside a Docker sandbox with three containers:
+
+- **Squid proxy** — filters outbound traffic by domain allowlist
+- **Agent** — runs your command; all HTTP/HTTPS is routed through Squid
+- **API proxy sidecar** *(optional)* — holds LLM API keys so they never reach the agent process
 
 ## Requirements
 
