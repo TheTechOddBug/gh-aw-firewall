@@ -71,6 +71,11 @@ The default `agent` image (based on Ubuntu 22.04) includes the following pre-ins
 | capsh | — | `libcap2-bin` | Capability management |
 | gnupg | 2.2.27 | `gnupg` | GPG encryption |
 | ca-certificates | — | `ca-certificates` | Trusted root certificates |
+| libgdiplus | — | `libgdiplus` | GDI+ implementation for .NET System.Drawing |
+| libev-dev | — | `libev-dev` | High-performance event loop library (development files) |
+| libssl-dev | — | `libssl-dev` | OpenSSL development headers for native extensions |
+| php-intl | — | `php-intl` | PHP Internationalization extension |
+| php-gd | — | `php-gd` | PHP GD graphics extension |
 
 :::caution[Docker CLI Stub]
 The `docker` command is present but is a stub—there is no Docker daemon running inside the container. Docker-in-Docker is not supported. Use `--mount` to access Docker sockets from the host if needed.
