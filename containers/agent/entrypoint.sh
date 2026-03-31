@@ -175,12 +175,26 @@ if [ -n "$CLAUDE_CODE_API_KEY_HELPER" ]; then
       if grep -q '"apiKeyHelper"' "$config_file"; then
         CONFIGURED_HELPER=$(grep -o '"apiKeyHelper":"[^"]*"' "$config_file" | cut -d'"' -f4)
         if [ "$CONFIGURED_HELPER" != "$CLAUDE_CODE_API_KEY_HELPER" ]; then
-          echo "[entrypoint][ERROR] apiKeyHelper mismatch in $label:"
-          echo "[entrypoint][ERROR]   Environment variable: $CLAUDE_CODE_API_KEY_HELPER"
-          echo "[entrypoint][ERROR]   Config file value: $CONFIGURED_HELPER"
-          exit 1
+          # Overwrite stale path (e.g. a previous run's chroot-adjusted path)
+          echo "[entrypoint] Updating apiKeyHelper in $label (was: $CONFIGURED_HELPER)"
+          if AWF_CONFIG_FILE="$config_file" AWF_KEY_HELPER="$CLAUDE_CODE_API_KEY_HELPER" \
+             node -e "
+               const fs = require('fs');
+               const f = process.env.AWF_CONFIG_FILE;
+               const obj = JSON.parse(fs.readFileSync(f, 'utf8'));
+               obj.apiKeyHelper = process.env.AWF_KEY_HELPER;
+               fs.writeFileSync(f, JSON.stringify(obj) + '\n');
+             " 2>/dev/null; then
+            chmod 666 "$config_file"
+            echo "[entrypoint] ✓ Updated apiKeyHelper in $label"
+          else
+            echo "{\"apiKeyHelper\":\"$CLAUDE_CODE_API_KEY_HELPER\"}" > "$config_file"
+            chmod 666 "$config_file"
+            echo "[entrypoint] ✓ Wrote apiKeyHelper to $label (overwrite fallback)"
+          fi
+        else
+          echo "[entrypoint] ✓ $label apiKeyHelper validated"
         fi
-        echo "[entrypoint] ✓ $label apiKeyHelper validated"
       else
         echo "[entrypoint] $label exists but missing apiKeyHelper, merging..."
         # Use node to safely add apiKeyHelper to existing JSON without losing other fields
@@ -423,6 +437,39 @@ if [ "${AWF_CHROOT_ENABLED}" = "true" ]; then
       echo "[entrypoint][ERROR] Could not create /tmp/awf-lib directory"
       echo "[entrypoint][ERROR] This should not happen - /tmp is mounted read-write in chroot mode"
       echo "[entrypoint][WARN] Token protection will be disabled (tokens may be readable multiple times)"
+    fi
+  fi
+
+  # Copy get-claude-key.sh to chroot-accessible path
+  # The script is baked into the Docker image at /usr/local/bin/, but the chroot
+  # bind-mounts the host's /usr (read-only), shadowing the container's copy.
+  # We must copy it to /tmp/awf-lib/ (writable) before the chroot activates.
+  if [ -n "$CLAUDE_CODE_API_KEY_HELPER" ] && [ -f "$CLAUDE_CODE_API_KEY_HELPER" ]; then
+    if mkdir -p /host/tmp/awf-lib 2>/dev/null; then
+      CHROOT_KEY_HELPER="/tmp/awf-lib/$(basename "$CLAUDE_CODE_API_KEY_HELPER")"
+      if cp "$CLAUDE_CODE_API_KEY_HELPER" "/host${CHROOT_KEY_HELPER}" 2>/dev/null && \
+         chmod +x "/host${CHROOT_KEY_HELPER}" 2>/dev/null; then
+        echo "[entrypoint] Claude key helper copied to chroot at ${CHROOT_KEY_HELPER}"
+        # Update apiKeyHelper in config files to use the chroot-accessible path
+        for cfg in "/host$HOME/.claude.json" "/host$HOME/.claude/settings.json"; do
+          if [ -f "$cfg" ] && grep -q '"apiKeyHelper"' "$cfg" 2>/dev/null; then
+            if AWF_CFG="$cfg" AWF_NEW="$CHROOT_KEY_HELPER" \
+               node -e "
+                 const fs = require('fs');
+                 const f = process.env.AWF_CFG;
+                 const obj = JSON.parse(fs.readFileSync(f, 'utf8'));
+                 obj.apiKeyHelper = process.env.AWF_NEW;
+                 fs.writeFileSync(f, JSON.stringify(obj) + '\n');
+               " 2>/dev/null; then
+              echo "[entrypoint] ✓ Updated apiKeyHelper path in $cfg"
+            fi
+          fi
+        done
+        CLAUDE_CODE_API_KEY_HELPER="$CHROOT_KEY_HELPER"
+      else
+        echo "[entrypoint][WARN] Could not copy get-claude-key.sh to chroot"
+        echo "[entrypoint][WARN] Claude Code API key helper may not work in chroot mode"
+      fi
     fi
   fi
 
