@@ -22,7 +22,7 @@ import {
 } from './host-iptables';
 import { runMainWorkflow } from './cli-workflow';
 import { redactSecrets } from './redact-secrets';
-import { validateDomainOrPattern } from './domain-patterns';
+import { validateDomainOrPattern, SQUID_DANGEROUS_CHARS } from './domain-patterns';
 import { loadAndMergeDomains } from './rules';
 import { detectHostDnsServers } from './dns-resolver';
 import { OutputFormat } from './types';
@@ -1664,6 +1664,13 @@ program
             logger.error('URL patterns must include a specific domain and path, e.g., https://github.com/org/*');
             process.exit(1);
           }
+        }
+
+        // Reject characters that could inject Squid config directives or tokens
+        if (SQUID_DANGEROUS_CHARS.test(url)) {
+          logger.error(`URL pattern contains characters unsafe for Squid config: ${JSON.stringify(url)}`);
+          logger.error('URL patterns must not contain whitespace, quotes, semicolons, backticks, hash characters, or null bytes.');
+          process.exit(1);
         }
 
         // Ensure pattern has a path component (not just domain)

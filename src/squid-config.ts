@@ -4,6 +4,7 @@ import {
   isDomainMatchedByPattern,
   PlainDomainEntry,
   DomainPattern,
+  SQUID_DANGEROUS_CHARS,
 } from './domain-patterns';
 import { generateDlpSquidConfig } from './dlp';
 import { DEFAULT_DNS_SERVERS } from './dns-resolver';
@@ -55,9 +56,25 @@ interface PatternsByProtocol {
 }
 
 /**
+ * Defense-in-depth: assert a domain/regex/URL-pattern string is safe for Squid config interpolation.
+ * Rejects whitespace, null bytes, quotes, semicolons, backticks, hash characters, and backslashes —
+ * all of which can inject directives, tokens, or comments into Squid config.
+ */
+function assertSafeForSquidConfig(value: string): string {
+  if (SQUID_DANGEROUS_CHARS.test(value)) {
+    throw new Error(
+      `SECURITY: Domain or pattern contains characters unsafe for Squid config and cannot be ` +
+      `interpolated into squid.conf: ${JSON.stringify(value)}`
+    );
+  }
+  return value;
+}
+
+/**
  * Helper to add leading dot to domain for Squid subdomain matching
  */
 function formatDomainForSquid(domain: string): string {
+  assertSafeForSquidConfig(domain);
   return domain.startsWith('.') ? domain : `.${domain}`;
 }
 
@@ -152,7 +169,7 @@ function generateSslBumpSection(
   let urlAccessRules = '';
   if (urlPatterns && urlPatterns.length > 0) {
     const urlAcls = urlPatterns
-      .map((pattern, i) => `acl allowed_url_${i} url_regex ${pattern}`)
+      .map((pattern, i) => `acl allowed_url_${i} url_regex ${assertSafeForSquidConfig(pattern)}`)
       .join('\n');
     urlAclSection = `\n# URL pattern ACLs for HTTPS content inspection\n${urlAcls}\n`;
 
