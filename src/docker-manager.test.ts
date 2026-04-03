@@ -1,4 +1,4 @@
-import { generateDockerCompose, subnetsOverlap, writeConfigs, startContainers, stopContainers, cleanup, runAgentCommand, validateIdNotInSystemRange, getSafeHostUid, getSafeHostGid, getRealUserHome, extractGhHostFromServerUrl, readGitHubPathEntries, mergeGitHubPathEntries, readEnvFile, MIN_REGULAR_UID, ACT_PRESET_BASE_IMAGE } from './docker-manager';
+import { generateDockerCompose, subnetsOverlap, writeConfigs, startContainers, stopContainers, fastKillAgentContainer, isAgentExternallyKilled, resetAgentExternallyKilled, AGENT_CONTAINER_NAME, cleanup, runAgentCommand, validateIdNotInSystemRange, getSafeHostUid, getSafeHostGid, getRealUserHome, extractGhHostFromServerUrl, readGitHubPathEntries, mergeGitHubPathEntries, readEnvFile, MIN_REGULAR_UID, ACT_PRESET_BASE_IMAGE } from './docker-manager';
 import { WrapperConfig } from './types';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -1726,7 +1726,7 @@ describe('docker-manager', () => {
         // Verify working_dir is set
         expect(result.services.agent.working_dir).toBe('/custom/workdir');
         // Verify other config is still present
-        expect(result.services.agent.container_name).toBe('awf-agent');
+        expect(result.services.agent.container_name).toBe(AGENT_CONTAINER_NAME);
         expect(result.services.agent.cap_add).toContain('SYS_CHROOT');
       });
 
@@ -2950,12 +2950,65 @@ describe('docker-manager', () => {
     });
   });
 
+  describe('fastKillAgentContainer', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+      resetAgentExternallyKilled();
+    });
+
+    it('should call docker stop with default 3-second timeout', async () => {
+      mockExecaFn.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+
+      await fastKillAgentContainer();
+
+      expect(mockExecaFn).toHaveBeenCalledWith(
+        'docker',
+        ['stop', '-t', '3', AGENT_CONTAINER_NAME],
+        { reject: false, timeout: 8000 }
+      );
+    });
+
+    it('should accept a custom stop timeout', async () => {
+      mockExecaFn.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+
+      await fastKillAgentContainer(5);
+
+      expect(mockExecaFn).toHaveBeenCalledWith(
+        'docker',
+        ['stop', '-t', '5', AGENT_CONTAINER_NAME],
+        { reject: false, timeout: 10000 }
+      );
+    });
+
+    it('should not throw when docker stop fails', async () => {
+      mockExecaFn.mockRejectedValueOnce(new Error('docker not found'));
+
+      await expect(fastKillAgentContainer()).resolves.toBeUndefined();
+    });
+
+    it('should set the externally-killed flag', async () => {
+      mockExecaFn.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+
+      expect(isAgentExternallyKilled()).toBe(false);
+      await fastKillAgentContainer();
+      expect(isAgentExternallyKilled()).toBe(true);
+    });
+
+    it('should set the externally-killed flag even when docker stop fails', async () => {
+      mockExecaFn.mockRejectedValueOnce(new Error('docker not found'));
+
+      await fastKillAgentContainer();
+      expect(isAgentExternallyKilled()).toBe(true);
+    });
+  });
+
   describe('runAgentCommand', () => {
     let testDir: string;
 
     beforeEach(() => {
       testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'awf-test-'));
       jest.clearAllMocks();
+      resetAgentExternallyKilled();
     });
 
     afterEach(() => {
@@ -3131,6 +3184,31 @@ describe('docker-manager', () => {
       expect(result.blockedDomains).toEqual([]);
 
       jest.useRealTimers();
+    });
+
+    it('should skip post-run analysis when agent was externally killed', async () => {
+      // Create access.log with denied entries — these should be ignored
+      const squidLogsDir = path.join(testDir, 'squid-logs');
+      fs.mkdirSync(squidLogsDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(squidLogsDir, 'access.log'),
+        '1760994429.358 172.30.0.20:36274 blocked.com:443 -:- 1.1 CONNECT 403 TCP_DENIED:HIER_NONE blocked.com:443 "curl/7.81.0"\n'
+      );
+
+      // Simulate fastKillAgentContainer having been called
+      mockExecaFn.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any); // fastKill docker stop
+      await fastKillAgentContainer();
+
+      // Mock docker logs -f
+      mockExecaFn.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 } as any);
+      // Mock docker wait — container was stopped externally, returns 143
+      mockExecaFn.mockResolvedValueOnce({ stdout: '143', stderr: '', exitCode: 0 } as any);
+
+      const result = await runAgentCommand(testDir, ['github.com']);
+
+      // Should return 143 and skip log analysis (empty blockedDomains)
+      expect(result.exitCode).toBe(143);
+      expect(result.blockedDomains).toEqual([]);
     });
   });
 
