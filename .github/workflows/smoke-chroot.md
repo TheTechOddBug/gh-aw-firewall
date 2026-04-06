@@ -24,9 +24,6 @@ network:
   allowed:
     - defaults
     - github
-sandbox:
-  mcp:
-    container: "ghcr.io/github/gh-aw-mcpg"
 tools:
   github:
     toolsets: [repos, pull_requests]
@@ -160,7 +157,7 @@ steps:
 post-steps:
   - name: Validate safe outputs were invoked
     run: |
-      OUTPUTS_FILE="${GH_AW_SAFE_OUTPUTS:-/opt/gh-aw/safeoutputs/outputs.jsonl}"
+      OUTPUTS_FILE="${GH_AW_SAFE_OUTPUTS:-${RUNNER_TEMP}/gh-aw/safeoutputs/outputs.jsonl}"
       if [ ! -s "$OUTPUTS_FILE" ]; then
         echo "::error::No safe outputs were invoked. Smoke tests require the agent to call safe output tools."
         exit 1
