@@ -759,6 +759,30 @@ AWFEOF
     CLEANUP_CMD="${CLEANUP_CMD}; rm -rf /tmp/awf-lib 2>/dev/null || true"
   fi
 
+  # Transfer ownership of gh-aw config directories to the chroot user.
+  # On self-hosted runners these directories are created by the host-side
+  # gh-aw tooling as root, so the unprivileged chroot user cannot access them.
+  # We use chown (not chmod a+rwX) to avoid making these dirs world-writable,
+  # which would be a security risk on multi-user self-hosted runners.
+  if [ -d /host/tmp/gh-aw ]; then
+    if chown -R "${HOST_UID}:${HOST_GID}" /host/tmp/gh-aw 2>/dev/null; then
+      echo "[entrypoint] Transferred /host/tmp/gh-aw ownership to chroot user (${HOST_UID}:${HOST_GID})"
+    else
+      echo "[entrypoint][WARN] Failed to transfer /host/tmp/gh-aw ownership to chroot user"
+    fi
+  fi
+  # Handle safe-outputs directory (path varies by gh-aw version)
+  if [ -n "${GH_AW_SAFE_OUTPUTS:-}" ]; then
+    _so_dir="/host$(dirname "$GH_AW_SAFE_OUTPUTS")"
+    if [ -d "$_so_dir" ]; then
+      if chown -R "${HOST_UID}:${HOST_GID}" "$_so_dir" 2>/dev/null; then
+        echo "[entrypoint] Transferred $_so_dir ownership to chroot user (${HOST_UID}:${HOST_GID})"
+      else
+        echo "[entrypoint][WARN] Failed to transfer $_so_dir ownership to chroot user"
+      fi
+    fi
+  fi
+
   # Build LD_PRELOAD command for one-shot token protection
   LD_PRELOAD_CMD=""
   if [ -n "${ONE_SHOT_TOKEN_LIB}" ]; then
