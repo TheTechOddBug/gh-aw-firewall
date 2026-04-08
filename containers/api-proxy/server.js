@@ -64,10 +64,48 @@ const ANTHROPIC_API_KEY = (process.env.ANTHROPIC_API_KEY || '').trim() || undefi
 const COPILOT_GITHUB_TOKEN = (process.env.COPILOT_GITHUB_TOKEN || '').trim() || undefined;
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || '').trim() || undefined;
 
+/**
+ * Normalizes an API target value to a bare hostname.
+ * Accepts either a hostname or a full URL and extracts only the hostname,
+ * discarding any scheme, path, query, fragment, credentials, or port.
+ * Path configuration must be provided separately via the existing
+ * *_API_BASE_PATH environment variables.
+ *
+ * @param {string|undefined} value - Raw env var value
+ * @returns {string|undefined} Bare hostname, or undefined if input is falsy
+ */
+function normalizeApiTarget(value) {
+  if (!value) return value;
+
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+
+  const candidate = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(trimmed)
+    ? trimmed
+    : `https://${trimmed}`;
+
+  try {
+    const parsed = new URL(candidate);
+
+    if (parsed.pathname !== '/' || parsed.search || parsed.hash || parsed.username || parsed.password || parsed.port) {
+      console.warn(
+        `Ignoring unsupported API target URL components in ${sanitizeForLog(trimmed)}; ` +
+        'configure path prefixes via the corresponding *_API_BASE_PATH environment variable.'
+      );
+    }
+
+    return parsed.hostname || undefined;
+  } catch (err) {
+    console.warn(`Invalid API target ${sanitizeForLog(trimmed)}; expected a hostname (e.g. 'api.example.com') or URL`);
+    return undefined;
+  }
+}
+
 // Configurable API target hosts (supports custom endpoints / internal LLM routers)
-const OPENAI_API_TARGET = process.env.OPENAI_API_TARGET || 'api.openai.com';
-const ANTHROPIC_API_TARGET = process.env.ANTHROPIC_API_TARGET || 'api.anthropic.com';
-const GEMINI_API_TARGET = process.env.GEMINI_API_TARGET || 'generativelanguage.googleapis.com';
+// Values are normalized to bare hostnames — buildUpstreamPath() prepends https://
+const OPENAI_API_TARGET = normalizeApiTarget(process.env.OPENAI_API_TARGET) || 'api.openai.com';
+const ANTHROPIC_API_TARGET = normalizeApiTarget(process.env.ANTHROPIC_API_TARGET) || 'api.anthropic.com';
+const GEMINI_API_TARGET = normalizeApiTarget(process.env.GEMINI_API_TARGET) || 'generativelanguage.googleapis.com';
 
 /**
  * Normalizes a base path for use as a URL path prefix.
@@ -123,7 +161,7 @@ const GEMINI_API_BASE_PATH = normalizeBasePath(process.env.GEMINI_API_BASE_PATH)
 // Priority: COPILOT_API_TARGET env var > auto-derive from GITHUB_SERVER_URL > default
 function deriveCopilotApiTarget() {
   if (process.env.COPILOT_API_TARGET) {
-    return process.env.COPILOT_API_TARGET;
+    return normalizeApiTarget(process.env.COPILOT_API_TARGET);
   }
   // Auto-derive from GITHUB_SERVER_URL:
   // - GitHub Enterprise Cloud (*.ghe.com): Copilot inference/models/MCP are served at
@@ -932,4 +970,4 @@ if (require.main === module) {
 }
 
 // Export for testing
-module.exports = { deriveCopilotApiTarget, normalizeBasePath, buildUpstreamPath, proxyWebSocket };
+module.exports = { normalizeApiTarget, deriveCopilotApiTarget, normalizeBasePath, buildUpstreamPath, proxyWebSocket };
