@@ -840,14 +840,14 @@ export interface WrapperConfig {
   githubToken?: string;
 
   /**
-   * Docker image reference for the mcpg DIFC proxy used inside the CLI proxy sidecar
+   * Docker image reference for the mcpg DIFC proxy container.
    *
-   * Passed as the `MCPG_IMAGE` build argument when building the cli-proxy image
-   * locally with `--build-local`.  Has no effect when using the pre-built GHCR
-   * cli-proxy image (mcpg is already bundled in that image).
+   * When `--enable-cli-proxy` is active, the mcpg proxy runs as a separate
+   * docker-compose service (awf-cli-proxy-mcpg) using this image directly.
+   * The CLI proxy HTTP server connects to it via the Docker network.
    *
-   * The AWF compiler (gh-aw) sets this to control which mcpg version is pulled
-   * and run, enabling version pinning and testing of new mcpg releases.
+   * The AWF compiler (gh-aw) sets this to control which mcpg version is used,
+   * enabling version pinning and testing of new mcpg releases.
    *
    * @default 'ghcr.io/github/gh-aw-mcpg:v0.2.15'
    * @example 'ghcr.io/github/gh-aw-mcpg:v0.3.0'
@@ -1207,11 +1207,24 @@ export interface DockerService {
    * - Object with IPs: { 'awf-net': { ipv4_address: '172.30.0.10' } } - Static IPs
    * 
    * Static IPs are used to ensure predictable addressing for iptables rules.
+   * Mutually exclusive with network_mode.
    * 
    * @example ['awf-net']
    * @example { 'awf-net': { ipv4_address: '172.30.0.10' } }
    */
-  networks: string[] | { [key: string]: { ipv4_address?: string } };
+  networks?: string[] | { [key: string]: { ipv4_address?: string } };
+
+  /**
+   * Network mode for the container
+   * 
+   * When set to 'service:<name>', the container shares the named service's
+   * network namespace. This is used when two containers need to communicate
+   * via localhost (e.g., for TLS cert hostname matching).
+   * Mutually exclusive with networks.
+   * 
+   * @example 'service:cli-proxy-mcpg'
+   */
+  network_mode?: string;
 
   /**
    * Custom DNS servers for the container
