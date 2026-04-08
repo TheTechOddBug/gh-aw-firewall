@@ -2060,11 +2060,11 @@ describe('cli', () => {
   });
 
   describe('emitCliProxyStatusLogs', () => {
-    it('should emit nothing when cli proxy is disabled', () => {
+    it('should emit nothing when difcProxyHost is not set', () => {
       const infos: string[] = [];
       const warns: string[] = [];
       emitCliProxyStatusLogs(
-        { enableCliProxy: false, githubToken: 'tok' },
+        { githubToken: 'tok' },
         (msg) => infos.push(msg),
         (msg) => warns.push(msg),
       );
@@ -2072,7 +2072,7 @@ describe('cli', () => {
       expect(warns).toHaveLength(0);
     });
 
-    it('should emit nothing when enableCliProxy is undefined', () => {
+    it('should emit nothing when difcProxyHost is undefined', () => {
       const infos: string[] = [];
       const warns: string[] = [];
       emitCliProxyStatusLogs(
@@ -2084,30 +2084,17 @@ describe('cli', () => {
       expect(warns).toHaveLength(0);
     });
 
-    it('should emit info when token is present (read-only)', () => {
+    it('should emit info when difcProxyHost is set with token', () => {
       const infos: string[] = [];
       const warns: string[] = [];
       emitCliProxyStatusLogs(
-        { enableCliProxy: true, githubToken: 'ghp_test123', cliProxyWritable: false },
+        { difcProxyHost: 'host.docker.internal:18443', githubToken: 'ghp_test123' },
         (msg) => infos.push(msg),
         (msg) => warns.push(msg),
       );
-      expect(infos).toHaveLength(1);
+      expect(infos.length).toBeGreaterThanOrEqual(1);
       expect(infos[0]).toContain('CLI proxy enabled');
-      expect(infos[0]).toContain('writable=false');
-      expect(warns).toHaveLength(0);
-    });
-
-    it('should emit info when token is present (writable)', () => {
-      const infos: string[] = [];
-      const warns: string[] = [];
-      emitCliProxyStatusLogs(
-        { enableCliProxy: true, githubToken: 'ghp_test123', cliProxyWritable: true },
-        (msg) => infos.push(msg),
-        (msg) => warns.push(msg),
-      );
-      expect(infos).toHaveLength(1);
-      expect(infos[0]).toContain('writable=true');
+      expect(infos[0]).toContain('host.docker.internal:18443');
       expect(warns).toHaveLength(0);
     });
 
@@ -2115,14 +2102,13 @@ describe('cli', () => {
       const infos: string[] = [];
       const warns: string[] = [];
       emitCliProxyStatusLogs(
-        { enableCliProxy: true },
+        { difcProxyHost: 'host.docker.internal:18443' },
         (msg) => infos.push(msg),
         (msg) => warns.push(msg),
       );
-      expect(infos).toHaveLength(0);
-      expect(warns).toHaveLength(2);
+      expect(infos.length).toBeGreaterThanOrEqual(1);
+      expect(warns.length).toBeGreaterThanOrEqual(1);
       expect(warns[0]).toContain('no GitHub token found');
-      expect(warns[1]).toContain('GITHUB_TOKEN or GH_TOKEN');
     });
   });
 
@@ -2475,7 +2461,7 @@ describe('cli', () => {
         imageTag: 'v1.0',
         agentImage: 'default',
         enableApiProxy: false,
-        enableCliProxy: true,
+        difcProxy: true,
       });
 
       expect(mockPredownloadCommand).toHaveBeenCalledWith({
@@ -2483,7 +2469,7 @@ describe('cli', () => {
         imageTag: 'v1.0',
         agentImage: 'default',
         enableApiProxy: false,
-        enableCliProxy: true,
+        difcProxy: true,
       });
     });
 

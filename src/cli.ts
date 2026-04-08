@@ -404,17 +404,18 @@ export function emitApiProxyTargetWarnings(
  * Extracted for testability (same pattern as emitApiProxyTargetWarnings).
  */
 export function emitCliProxyStatusLogs(
-  config: { enableCliProxy?: boolean; cliProxyWritable?: boolean; githubToken?: string },
+  config: { difcProxyHost?: string; githubToken?: string },
   info: (msg: string) => void,
   warn: (msg: string) => void,
 ): void {
-  if (!config.enableCliProxy) return;
+  if (!config.difcProxyHost) return;
 
+  info(`CLI proxy enabled: connecting to external DIFC proxy at ${config.difcProxyHost}`);
   if (config.githubToken) {
-    info(`CLI proxy enabled: token present (GITHUB_TOKEN/GH_TOKEN), writable=${!!config.cliProxyWritable}`);
+    info('GitHub token present — will be excluded from agent environment');
   } else {
     warn('⚠️  CLI proxy enabled but no GitHub token found in environment');
-    warn('   Set GITHUB_TOKEN or GH_TOKEN to enable authenticated gh CLI access through the proxy');
+    warn('   The external DIFC proxy handles token authentication');
   }
 }
 
@@ -1439,29 +1440,17 @@ program
     'Disable rate limiting in the API proxy (requires --enable-api-proxy)',
   )
 
-  // -- CLI Proxy --
+  // -- CLI Proxy (external DIFC proxy) --
   .option(
-    '--enable-cli-proxy',
-    'Enable gh CLI proxy sidecar for secure GitHub CLI access.\n' +
-    '                                       Routes gh commands through mcpg DIFC proxy with guard policies.\n' +
-    '                                       GH_TOKEN is held in the sidecar; never exposed to the agent.',
-    false
+    '--difc-proxy-host <host:port>',
+    'Connect to an external DIFC proxy (mcpg) at host:port.\n' +
+    '                                       Enables the CLI proxy sidecar that routes gh commands through the DIFC proxy.\n' +
+    '                                       The DIFC proxy must be started externally (e.g., by the gh-aw compiler).',
   )
   .option(
-    '--cli-proxy-writable',
-    'Allow write operations through the CLI proxy (default: read-only)',
-    false
-  )
-  .option(
-    '--cli-proxy-policy <json>',
-    'Guard policy JSON for the mcpg DIFC proxy inside the CLI proxy sidecar\n' +
-    '                                       (e.g. \'{"repos":["owner/repo"],"min-integrity":"public"}\')',
-  )
-  .option(
-    '--cli-proxy-mcpg-image <image>',
-    'Docker image for the mcpg DIFC proxy container (runs as a separate service alongside cli-proxy)\n' +
-    '                                       Set by the AWF compiler to control which mcpg version is used',
-    'ghcr.io/github/gh-aw-mcpg:v0.2.15'
+    '--difc-proxy-ca-cert <path>',
+    'Path to TLS CA cert written by the external DIFC proxy.\n' +
+    '                                       Recommended when --difc-proxy-host is set for TLS verification.',
   )
   // -- Logging & Debug --
   .option(
@@ -1834,10 +1823,8 @@ program
       anthropicApiBasePath: options.anthropicApiBasePath || process.env.ANTHROPIC_API_BASE_PATH,
       geminiApiTarget: options.geminiApiTarget || process.env.GEMINI_API_TARGET,
       geminiApiBasePath: options.geminiApiBasePath || process.env.GEMINI_API_BASE_PATH,
-      enableCliProxy: options.enableCliProxy,
-      cliProxyWritable: options.cliProxyWritable,
-      cliProxyPolicy: options.cliProxyPolicy,
-      cliProxyMcpgImage: options.cliProxyMcpgImage,
+      difcProxyHost: options.difcProxyHost,
+      difcProxyCaCert: options.difcProxyCaCert,
       githubToken: process.env.GITHUB_TOKEN || process.env.GH_TOKEN,
     };
 
@@ -2062,8 +2049,7 @@ export async function handlePredownloadAction(options: {
   imageTag: string;
   agentImage: string;
   enableApiProxy: boolean;
-  enableCliProxy?: boolean;
-  cliProxyMcpgImage?: string;
+  difcProxy?: boolean;
 }): Promise<void> {
   const { predownloadCommand } = await import('./commands/predownload');
   try {
@@ -2072,8 +2058,7 @@ export async function handlePredownloadAction(options: {
       imageTag: options.imageTag,
       agentImage: options.agentImage,
       enableApiProxy: options.enableApiProxy,
-      enableCliProxy: options.enableCliProxy,
-      cliProxyMcpgImage: options.cliProxyMcpgImage,
+      difcProxy: options.difcProxy,
     });
   } catch (error) {
     const exitCode = (error as Error & { exitCode?: number }).exitCode ?? 1;
@@ -2097,8 +2082,7 @@ program
     'default'
   )
   .option('--enable-api-proxy', 'Also download the API proxy image', false)
-  .option('--enable-cli-proxy', 'Also download the CLI proxy image', false)
-  .option('--cli-proxy-mcpg-image <image>', 'Docker image for the mcpg DIFC proxy container', 'ghcr.io/github/gh-aw-mcpg:v0.2.15')
+  .option('--difc-proxy', 'Also download the CLI proxy image (for --difc-proxy-host)', false)
   .action(handlePredownloadAction);
 
 // Logs subcommand - view Squid proxy logs
