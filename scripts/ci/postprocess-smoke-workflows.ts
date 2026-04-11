@@ -92,6 +92,118 @@ const imageTagRegex = /--image-tag\s+[0-9.]+\s+--skip-pull/g;
 const updateCacheSetupScriptRegex =
   /^(\s+)- name: Setup Scripts\n\1  uses: github\/gh-aw\/actions\/setup@v[\d.]+\n\1  with:\n\1    destination: \/opt\/gh-aw\/actions\n(\1- name: Download cache-memory artifact)/gm;
 
+// Cache-memory security hardening patterns (issue: execute-bit persistence and
+// instruction-injection across cache restore cycles).
+//
+// 1. setupCacheMemoryStepRegex: matches the "Setup cache-memory git repository"
+//    step so we can inject a sanitize step immediately after it.
+// 2. stripExecBitsStepSentinel: idempotency guard — skip injection if this
+//    step name already appears right after the setup step.
+// 3. cacheMemoryCommitStepRegex: matches the "Commit cache-memory changes" step
+//    so we can inject a scan step immediately before it.
+// 4. scanInjectionStepSentinel: idempotency guard for the scan step.
+// 5. cacheMemoryDateStepRegex: matches the "Create cache-memory directory" step
+//    followed by the "Cache cache-memory file share data" cache action so we
+//    can inject a date computation step and add a TTL to the restore-keys.
+const setupCacheMemoryStepRegex =
+  /^(\s+)- name: Setup cache-memory git repository\n(?:\1\s[^\n]*\n)*?\1  run: bash "\$\{RUNNER_TEMP\}\/gh-aw\/actions\/setup_cache_memory_git\.sh"\n/m;
+const stripExecBitsStepSentinel = '- name: Strip execute bits from cache-memory files';
+const cacheMemoryCommitStepRegex =
+  /^(\s+)- name: Commit cache-memory changes\n(?:\1\s[^\n]*\n)*?\1  run: bash "\$\{RUNNER_TEMP\}\/gh-aw\/actions\/commit_cache_memory_git\.sh"\n/m;
+const scanInjectionStepSentinel = '- name: Scan cache-memory for instruction-injection content';
+// Matches the "Create cache-memory directory" run step (just before the cache
+// action) so we can inject the date-key computation step between them.
+// Handles two step names:
+//   "Cache cache-memory file share data" — combined actions/cache
+//   "Restore cache-memory file share data" — split actions/cache/restore + save
+const createCacheDirStepRegex =
+  /^(\s+)(- name: Create cache-memory directory\n\1  run: bash "\$\{RUNNER_TEMP\}\/gh-aw\/actions\/create_cache_memory_dir\.sh"\n)(\1- name: (?:Cache|Restore) cache-memory file share data\n)/m;
+const cacheDateStepSentinel = '- name: Compute cache-memory TTL date key';
+// Matches cache-memory key lines so we can insert the date env var for TTL.
+// Handles both forms:
+//   key: memory-none-nopolicy-${{ env.GH_AW_WORKFLOW_ID_SANITIZED }}-${{ github.run_id }}
+//   key: memory-none-nopolicy-issue-duplication-detector-${{ github.run_id }}
+const cacheMemoryKeyLineRegex =
+  /(key: memory-none-nopolicy-(?:\$\{\{ env\.GH_AW_WORKFLOW_ID_SANITIZED \}\}|[a-z0-9-]+)-)\$\{\{ github\.run_id \}\}/g;
+// Matches the restore-keys prefix line for cache-memory so we can insert the
+// date env var between the workflow-ID segment and the trailing dash.
+// Handles two forms:
+//   memory-none-nopolicy-${{ env.GH_AW_WORKFLOW_ID_SANITIZED }}-
+//   memory-none-nopolicy-issue-duplication-detector-  (hardcoded workflow id)
+const cacheRestoreKeyPrefixRegex =
+  /(memory-none-nopolicy-(?:\$\{\{ env\.GH_AW_WORKFLOW_ID_SANITIZED \}\}|[a-z0-9-]+)-)(\n)/g;
+const cacheDateRestoreKeySentinel = 'env.CACHE_MEMORY_DATE }}';
+
+// Builds the YAML for the "Strip execute bits" step.
+function buildStripExecBitsStep(indent: string): string {
+  const i = indent;
+  const ri = `${i}    `;
+  return (
+    `${i}- name: Strip execute bits from cache-memory files\n` +
+    `${i}  if: always()\n` +
+    `${i}  env:\n` +
+    `${i}    GH_AW_CACHE_DIR: /tmp/gh-aw/cache-memory\n` +
+    `${i}  run: |\n` +
+    `${ri}CACHE_DIR="\${GH_AW_CACHE_DIR:-/tmp/gh-aw/cache-memory}"\n` +
+    `${ri}# Strip execute bits from all non-.git files to prevent execute-bit\n` +
+    `${ri}# persistence of attacker-planted executables across cache restore cycles.\n` +
+    `${ri}if [ -d "$CACHE_DIR" ]; then\n` +
+    `${ri}  find "$CACHE_DIR" -not -path '*/.git/*' -type f -exec chmod a-x {} + || true\n` +
+    `${ri}  echo "Execute bits stripped from cache-memory working tree"\n` +
+    `${ri}else\n` +
+    `${ri}  echo "Skipping execute-bit stripping; cache-memory directory not present"\n` +
+    `${ri}fi\n`
+  );
+}
+
+// Builds the YAML for the "Scan cache-memory for instruction-injection" step.
+function buildScanInjectionStep(indent: string): string {
+  const i = indent;
+  const ri = `${i}    `;
+  return (
+    `${i}- name: Scan cache-memory for instruction-injection content\n` +
+    `${i}  if: always()\n` +
+    `${i}  env:\n` +
+    `${i}    GH_AW_CACHE_DIR: /tmp/gh-aw/cache-memory\n` +
+    `${i}  run: |\n` +
+    `${ri}CACHE_DIR="\${GH_AW_CACHE_DIR:-/tmp/gh-aw/cache-memory}"\n` +
+    `${ri}# Quarantine files containing instruction-shaped content to prevent\n` +
+    `${ri}# cross-run agent-context instruction injection via cache-memory.\n` +
+    `${ri}# Require a colon after the keyword to reduce false positives on\n` +
+    `${ri}# legitimate files (e.g. '## System Requirements', 'Override: false').\n` +
+    `${ri}INJECTION_PATTERN='^(New instruction:|SYSTEM:|Ignore (all |previous |prior )instructions?:|<system>)'\n` +
+    `${ri}QUARANTINE_DIR="\${GH_AW_CACHE_DIR:-/tmp/gh-aw/cache-memory}/.quarantine"\n` +
+    `${ri}mapfile -t SUSPICIOUS_FILES < <(\n` +
+    `${ri}  find "$CACHE_DIR" -not -path '*/.git/*' -not -path '*/.quarantine/*' -type f \\\n` +
+    `${ri}    -exec grep -lEi "$INJECTION_PATTERN" {} \\; 2>/dev/null || true\n` +
+    `${ri})\n` +
+    `${ri}if [ \${#SUSPICIOUS_FILES[@]} -gt 0 ]; then\n` +
+    `${ri}  mkdir -p "$QUARANTINE_DIR"\n` +
+    `${ri}  for f in "\${SUSPICIOUS_FILES[@]}"; do\n` +
+    `${ri}    rel="\${f#\${CACHE_DIR}/}"\n` +
+    `${ri}    echo "::warning::Quarantining file with instruction-shaped content: $f"\n` +
+    `${ri}    echo "--- First 5 lines of quarantined file: $f ---"\n` +
+    `${ri}    head -5 "$f" | sed 's/^/| /' || true\n` +
+    `${ri}    mkdir -p "$QUARANTINE_DIR/$(dirname "$rel")"\n` +
+    `${ri}    mv -f "$f" "$QUARANTINE_DIR/$rel"\n` +
+    `${ri}  done\n` +
+    `${ri}  echo "Quarantined \${#SUSPICIOUS_FILES[@]} file(s) with instruction-shaped content to $QUARANTINE_DIR"\n` +
+    `${ri}else\n` +
+    `${ri}  echo "No instruction-injection content found in cache-memory"\n` +
+    `${ri}fi\n`
+  );
+}
+
+// Builds the YAML for the "Compute cache-memory TTL date key" step.
+function buildCacheDateStep(indent: string): string {
+  const i = indent;
+  const ri = `${i}    `;
+  return (
+    `${i}- name: Compute cache-memory TTL date key\n` +
+    `${i}  run: echo "CACHE_MEMORY_DATE=$(date -u +%Y%m%d)" >> "$GITHUB_ENV"\n`
+  );
+}
+
 // Replace the xpia.md cat command with a safe inline security policy.
 // gh-aw v0.64.2+ includes xpia.md in the Codex prompt but the file contains
 // specific cybersecurity attack terminology (e.g. "container escape",
@@ -367,6 +479,127 @@ for (const workflowPath of workflowPaths) {
     console.log(
       `  Removed ${updateCacheSetupMatches.length} unused Setup Scripts step(s) from update_cache_memory`
     );
+  }
+
+  // ── Cache-memory security hardening ─────────────────────────────────────
+  // Fix for execute-bit persistence and instruction-injection across cache
+  // restore cycles (issue: cache-memory pipeline integrity at none integrity).
+  //
+  // 1. Inject "Strip execute bits" step after "Setup cache-memory git repository"
+  //    to strip execute bits from all restored files before the agent runs.
+  // 2. Inject "Scan cache-memory for instruction-injection content" step before
+  //    "Commit cache-memory changes" to remove instruction-shaped files before
+  //    they are committed and persisted into the next run's cache.
+  // 3. Inject "Compute cache-memory TTL date key" step before the cache action
+  //    and update restore-keys to include the date for a 1-day TTL, preventing
+  //    stale cache entries from being restored beyond a single calendar day.
+
+  // (1) Strip execute bits after cache-memory git setup
+  if (!content.includes(stripExecBitsStepSentinel)) {
+    const setupMatch = content.match(setupCacheMemoryStepRegex);
+    if (setupMatch) {
+      const indent = setupMatch[1];
+      content = content.replace(
+        setupCacheMemoryStepRegex,
+        (m) => m + buildStripExecBitsStep(indent)
+      );
+      modified = true;
+      console.log(`  Injected 'Strip execute bits' step after cache-memory setup`);
+    }
+  } else {
+    console.log(`  'Strip execute bits' step already present`);
+  }
+
+  // (2) Scan for instruction-injection content before cache-memory commit.
+  // The scan step content has been updated to use quarantine-based handling
+  // (moving files to .quarantine/ instead of deleting them) and a tighter
+  // injection pattern (requires colons, e.g. 'SYSTEM:' not just 'SYSTEM').
+  // The 'QUARANTINE_DIR' string acts as a sentinel for the new version.
+  const scanStepNewVersion = 'QUARANTINE_DIR';
+  if (!content.includes(scanInjectionStepSentinel)) {
+    const commitMatch = content.match(cacheMemoryCommitStepRegex);
+    if (commitMatch) {
+      const indent = commitMatch[1];
+      content = content.replace(
+        cacheMemoryCommitStepRegex,
+        (m) => buildScanInjectionStep(indent) + m
+      );
+      modified = true;
+      console.log(`  Injected 'Scan cache-memory for instruction-injection' step before commit`);
+    }
+  } else if (!content.includes(scanStepNewVersion)) {
+    // Old version of the scan step is present — replace it with the new version.
+    // Match the entire step block by name + run block up to the next step.
+    const oldScanStepRegex =
+      /^(\s+)- name: Scan cache-memory for instruction-injection content\n(?:\1\s[^\n]*\n)+/m;
+    const oldMatch = content.match(oldScanStepRegex);
+    if (oldMatch) {
+      const indent = oldMatch[1];
+      content = content.replace(oldScanStepRegex, buildScanInjectionStep(indent));
+      modified = true;
+      console.log(`  Updated 'Scan cache-memory for instruction-injection' step to new version`);
+    }
+  } else {
+    console.log(`  'Scan cache-memory for instruction-injection' step already present (new version)`);
+  }
+
+  // (3) Add TTL date key step and update key/restore-keys to include daily date
+  if (!content.includes(cacheDateStepSentinel)) {
+    const createCacheMatch = content.match(createCacheDirStepRegex);
+    if (createCacheMatch) {
+      const indent = createCacheMatch[1];
+      // Inject the date computation step between "Create cache-memory directory"
+      // and the cache action step ("Cache" or "Restore" cache-memory file share data)
+      content = content.replace(
+        createCacheDirStepRegex,
+        (_m, ind, createStep, cacheStep) =>
+          ind + createStep + buildCacheDateStep(ind) + cacheStep
+      );
+      modified = true;
+      console.log(`  Injected 'Compute cache-memory TTL date key' step before cache action`);
+    }
+  } else {
+    console.log(`  'Compute cache-memory TTL date key' step already present`);
+  }
+
+  // Update the main cache key lines and restore-keys prefix to include the date
+  // for a 1-day TTL. Apply each transformation independently so partially
+  // updated workflows are repaired correctly and repeated runs stay idempotent.
+  if (content.includes(cacheDateStepSentinel)) {
+    let updatedCacheKey = false;
+    let updatedRestoreKeys = false;
+
+    // Update main key: insert date before run_id
+    const beforeKeyUpdate = content;
+    content = content.replace(
+      cacheMemoryKeyLineRegex,
+      (_m, prefix) => `${prefix}\${{ env.CACHE_MEMORY_DATE }}-\${{ github.run_id }}`
+    );
+    updatedCacheKey = content !== beforeKeyUpdate;
+
+    // Update restore-keys prefix: append date segment
+    const beforeRestoreKeysUpdate = content;
+    content = content.replace(
+      cacheRestoreKeyPrefixRegex,
+      (_m, prefixWithWorkflowId, newline) =>
+        `${prefixWithWorkflowId}\${{ env.CACHE_MEMORY_DATE }}-${newline}`
+    );
+    updatedRestoreKeys = content !== beforeRestoreKeysUpdate;
+
+    if (updatedCacheKey || updatedRestoreKeys) {
+      modified = true;
+      if (updatedCacheKey && updatedRestoreKeys) {
+        console.log(`  Updated cache key and restore-keys to include CACHE_MEMORY_DATE for 1-day TTL`);
+      } else if (updatedCacheKey) {
+        console.log(`  Updated cache key to include CACHE_MEMORY_DATE for 1-day TTL`);
+      } else {
+        console.log(`  Updated restore-keys to include CACHE_MEMORY_DATE for 1-day TTL`);
+      }
+    } else {
+      console.log(`  Cache key/restore-keys already include CACHE_MEMORY_DATE`);
+    }
+  } else if (content.includes(cacheDateRestoreKeySentinel)) {
+    console.log(`  Cache key/restore-keys already include CACHE_MEMORY_DATE`);
   }
 
   if (modified) {
