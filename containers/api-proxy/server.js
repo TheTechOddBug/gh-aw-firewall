@@ -289,6 +289,33 @@ if (!proxyAgent) {
 }
 
 /**
+ * Resolves the OpenCode routing configuration based on available credentials.
+ * Priority: OPENAI_API_KEY > ANTHROPIC_API_KEY > copilotToken (COPILOT_GITHUB_TOKEN / COPILOT_API_KEY)
+ *
+ * @param {string|undefined} openaiKey
+ * @param {string|undefined} anthropicKey
+ * @param {string|undefined} copilotToken
+ * @param {string} openaiTarget
+ * @param {string} anthropicTarget
+ * @param {string} copilotTarget
+ * @param {string} [openaiBasePath]
+ * @param {string} [anthropicBasePath]
+ * @returns {{ target: string, headers: Record<string,string>, basePath: string|undefined, needsAnthropicVersion: boolean } | null}
+ */
+function resolveOpenCodeRoute(openaiKey, anthropicKey, copilotToken, openaiTarget, anthropicTarget, copilotTarget, openaiBasePath, anthropicBasePath) {
+  if (openaiKey) {
+    return { target: openaiTarget, headers: { 'Authorization': `Bearer ${openaiKey}` }, basePath: openaiBasePath, needsAnthropicVersion: false };
+  }
+  if (anthropicKey) {
+    return { target: anthropicTarget, headers: { 'x-api-key': anthropicKey }, basePath: anthropicBasePath, needsAnthropicVersion: true };
+  }
+  if (copilotToken) {
+    return { target: copilotTarget, headers: { 'Authorization': `Bearer ${copilotToken}` }, basePath: undefined, needsAnthropicVersion: false };
+  }
+  return null;
+}
+
+/**
  * Check rate limit and send 429 if exceeded.
  * Returns true if request was rate-limited (caller should return early).
  */
@@ -1027,11 +1054,22 @@ if (require.main === module) {
     });
   }
 
-  // OpenCode API proxy (port 10004) — routes to Anthropic (default BYOK provider)
-  // OpenCode gets a separate port from Claude (10001) for per-engine rate limiting,
-  // metrics isolation, and future provider routing (OpenCode is BYOK and may route
-  // to different providers in the future based on model prefix).
-  if (ANTHROPIC_API_KEY) {
+  // OpenCode API proxy (port 10004) — dynamic provider routing
+  // Defaults to Copilot/OpenAI routing (OPENAI_API_KEY), with Anthropic as a BYOK fallback.
+  // OpenCode gets a separate port from Claude (10001) and Codex (10000) for per-engine
+  // rate limiting and metrics isolation.
+  //
+  // Credential priority (first available wins):
+  //   1. OPENAI_API_KEY                  → OpenAI/Copilot-compatible route (OPENAI_API_TARGET)
+  //   2. ANTHROPIC_API_KEY               → Anthropic BYOK route (ANTHROPIC_API_TARGET)
+  //   3. COPILOT_GITHUB_TOKEN/API_KEY    → Copilot route (COPILOT_API_TARGET),
+  //                                        resolved internally to COPILOT_AUTH_TOKEN
+  const opencodeStartupRoute = resolveOpenCodeRoute(
+    OPENAI_API_KEY, ANTHROPIC_API_KEY, COPILOT_AUTH_TOKEN,
+    OPENAI_API_TARGET, ANTHROPIC_API_TARGET, COPILOT_API_TARGET,
+    OPENAI_API_BASE_PATH, ANTHROPIC_API_BASE_PATH
+  );
+  if (opencodeStartupRoute) {
     const opencodeServer = http.createServer((req, res) => {
       if (req.url === '/health' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1046,26 +1084,59 @@ if (require.main === module) {
         method: logMethod,
         url: logUrl,
       });
-      logRequest('info', 'opencode_proxy_header_injection', {
-        message: '[OpenCode Proxy] Injecting x-api-key header with ANTHROPIC_API_KEY',
-      });
-      const anthropicHeaders = { 'x-api-key': ANTHROPIC_API_KEY };
-      if (!req.headers['anthropic-version']) {
-        anthropicHeaders['anthropic-version'] = '2023-06-01';
+
+      const parsedContentLength = Number(req.headers['content-length']);
+      const contentLength = Number.isFinite(parsedContentLength) && parsedContentLength > 0 ? parsedContentLength : 0;
+      if (checkRateLimit(req, res, 'opencode', contentLength)) {
+        return;
       }
-      proxyRequest(req, res, ANTHROPIC_API_TARGET, anthropicHeaders);
+
+      const route = resolveOpenCodeRoute(
+        OPENAI_API_KEY, ANTHROPIC_API_KEY, COPILOT_AUTH_TOKEN,
+        OPENAI_API_TARGET, ANTHROPIC_API_TARGET, COPILOT_API_TARGET,
+        OPENAI_API_BASE_PATH, ANTHROPIC_API_BASE_PATH
+      );
+      if (!route) {
+        logRequest('error', 'opencode_no_credentials', { message: '[OpenCode Proxy] No credentials available; cannot route request' });
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'OpenCode proxy has no credentials configured' }));
+        return;
+      }
+
+      logRequest('info', 'opencode_proxy_routing_target', {
+        message: `[OpenCode Proxy] Routing to ${route.target}`,
+        target: route.target,
+      });
+
+      const headers = Object.assign({}, route.headers);
+      if (route.needsAnthropicVersion && !req.headers['anthropic-version']) {
+        headers['anthropic-version'] = '2023-06-01';
+      }
+      proxyRequest(req, res, route.target, headers, 'opencode', route.basePath);
     });
 
     opencodeServer.on('upgrade', (req, socket, head) => {
-      const anthropicHeaders = { 'x-api-key': ANTHROPIC_API_KEY };
-      if (!req.headers['anthropic-version']) {
-        anthropicHeaders['anthropic-version'] = '2023-06-01';
+      const route = resolveOpenCodeRoute(
+        OPENAI_API_KEY, ANTHROPIC_API_KEY, COPILOT_AUTH_TOKEN,
+        OPENAI_API_TARGET, ANTHROPIC_API_TARGET, COPILOT_API_TARGET,
+        OPENAI_API_BASE_PATH, ANTHROPIC_API_BASE_PATH
+      );
+      if (!route) {
+        logRequest('error', 'opencode_no_credentials', { message: '[OpenCode Proxy] No credentials available; cannot upgrade WebSocket' });
+        socket.write('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return;
       }
-      proxyWebSocket(req, socket, head, ANTHROPIC_API_TARGET, anthropicHeaders, 'opencode');
+
+      const headers = Object.assign({}, route.headers);
+      if (route.needsAnthropicVersion && !req.headers['anthropic-version']) {
+        headers['anthropic-version'] = '2023-06-01';
+      }
+      proxyWebSocket(req, socket, head, route.target, headers, 'opencode', route.basePath);
     });
 
     opencodeServer.listen(10004, '0.0.0.0', () => {
-      console.log(`[API Proxy] OpenCode proxy listening on port 10004 (-> Anthropic at ${ANTHROPIC_API_TARGET})`);
+      logRequest('info', 'server_start', { message: `OpenCode proxy listening on port 10004 (-> ${opencodeStartupRoute.target})` });
     });
   }
 
@@ -1084,4 +1155,4 @@ if (require.main === module) {
 }
 
 // Export for testing
-module.exports = { normalizeApiTarget, deriveCopilotApiTarget, deriveGitHubApiTarget, deriveGitHubApiBasePath, normalizeBasePath, buildUpstreamPath, proxyWebSocket, resolveCopilotAuthToken };
+module.exports = { normalizeApiTarget, deriveCopilotApiTarget, deriveGitHubApiTarget, deriveGitHubApiBasePath, normalizeBasePath, buildUpstreamPath, proxyWebSocket, resolveCopilotAuthToken, resolveOpenCodeRoute };
