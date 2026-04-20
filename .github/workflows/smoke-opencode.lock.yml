@@ -759,11 +759,57 @@ jobs:
         run: |
           bash "${RUNNER_TEMP}/gh-aw/actions/start_cli_proxy.sh"
       - name: Write OpenCode configuration
+        env:
+          COPILOT_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          MCP_GATEWAY_PORT: ${{ steps.start-mcp-gateway.outputs.gateway-port }}
+          MCP_GATEWAY_API_KEY: ${{ steps.start-mcp-gateway.outputs.gateway-api-key }}
         run: |
           umask 077
           mkdir -p "$GITHUB_WORKSPACE"
           CONFIG="$GITHUB_WORKSPACE/opencode.jsonc"
-          BASE_CONFIG='{"agent":{"build":{"permissions":{"bash":"allow","edit":"allow","read":"allow","glob":"allow","grep":"allow","write":"allow","webfetch":"allow","websearch":"allow"}}}}'
+          BASE_CONFIG=$(cat <<'OCEOF'
+          {
+            "model": "copilot-proxy/gpt-4.1",
+            "provider": {
+              "copilot-proxy": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Copilot API Proxy",
+                "options": {
+                  "baseURL": "http://172.30.0.30:10004"
+                },
+                "models": {
+                  "gpt-4.1": { "name": "GPT-4.1" }
+                }
+              }
+            },
+            "agent": {
+              "build": {
+                "permission": {
+                  "bash": "allow",
+                  "edit": "allow",
+                  "read": "allow",
+                  "glob": "allow",
+                  "grep": "allow",
+                  "write": "allow",
+                  "webfetch": "allow",
+                  "websearch": "allow",
+                  "external_directory": "allow"
+                }
+              }
+            },
+            "instructions": [
+              "IMPORTANT: You have MCP tools from the 'safeoutputs' server. Use the add_comment MCP tool to post comments on PRs. Do NOT use gh CLI for writing. You MUST call the add_comment MCP tool before finishing."
+            ]
+          }
+          OCEOF
+          )
+          # Add MCP gateway config with runtime values (port + API key from gateway step)
+          # Gateway uses routed mode: /mcp/<server-name>
+          MCP_CONFIG=$(jq -n \
+            --arg url "http://host.docker.internal:${MCP_GATEWAY_PORT}/mcp/safeoutputs" \
+            --arg key "${MCP_GATEWAY_API_KEY}" \
+            '{mcp: {safeoutputs: {type: "remote", url: $url, headers: {Authorization: $key}, timeout: 30000}}}')
+          BASE_CONFIG=$(echo "$BASE_CONFIG" | jq --argjson mcp "$MCP_CONFIG" '. * $mcp')
           if [ -f "$CONFIG" ]; then
             MERGED=$(jq -n --argjson base "$BASE_CONFIG" --argjson existing "$(cat "$CONFIG")" '$existing * $base')
             echo "$MERGED" > "$CONFIG"
@@ -771,6 +817,15 @@ jobs:
             echo "$BASE_CONFIG" > "$CONFIG"
           fi
           chmod 600 "$CONFIG"
+          echo "[INFO] OpenCode config:"
+          cat "$CONFIG"
+          # Pre-populate OpenCode auth — the api-proxy doesn't check incoming auth,
+          # so we use a placeholder. The real Copilot token is held by the api-proxy.
+          AUTH_DIR="$HOME/.local/share/opencode"
+          mkdir -p "$AUTH_DIR"
+          echo '{"copilot-proxy": "placeholder-key"}' > "$AUTH_DIR/auth.json"
+          chmod 600 "$AUTH_DIR/auth.json"
+          echo "[INFO] OpenCode auth.json written for copilot-proxy provider"
       - name: Execute OpenCode CLI
         id: agentic_execution
         run: |
@@ -785,8 +840,7 @@ jobs:
           GH_AW_SAFE_OUTPUTS: ${{ steps.set-runtime-paths.outputs.GH_AW_SAFE_OUTPUTS }}
           GITHUB_WORKSPACE: ${{ github.workspace }}
           NO_PROXY: localhost,127.0.0.1
-          OPENAI_API_KEY: ${{ secrets.COPILOT_GITHUB_TOKEN }}
-          OPENAI_BASE_URL: http://host.docker.internal:10004
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
       - name: Stop CLI proxy
         if: always()
         continue-on-error: true
