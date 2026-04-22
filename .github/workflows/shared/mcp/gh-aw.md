@@ -14,12 +14,15 @@ steps:
       # Install gh-aw if not already available
       if ! gh aw --version >/dev/null 2>&1; then
         echo "Installing gh-aw extension..."
-        curl -fsSL https://raw.githubusercontent.com/github/gh-aw/refs/heads/main/install-gh-aw.sh | bash
+        # Download to a temp file first so curl failures are detected (avoids silent pipe failure)
+        curl -fsSL https://raw.githubusercontent.com/github/gh-aw/refs/heads/main/install-gh-aw.sh -o /tmp/install-gh-aw.sh
+        bash /tmp/install-gh-aw.sh
+        rm -f /tmp/install-gh-aw.sh
       fi
       gh aw --version
       # Copy the gh-aw binary to RUNNER_TEMP for MCP server containerization
       mkdir -p "${RUNNER_TEMP}/gh-aw"
-      GH_AW_BIN=$(which gh-aw 2>/dev/null || find ~/.local/share/gh/extensions/gh-aw -name 'gh-aw' -type f 2>/dev/null | head -1)
+      GH_AW_BIN=$(which gh-aw 2>/dev/null || find "${HOME}/.local/share/gh/extensions/gh-aw" -name 'gh-aw' 2>/dev/null | head -1)
       if [ -n "$GH_AW_BIN" ] && [ -f "$GH_AW_BIN" ]; then
         cp "$GH_AW_BIN" "${RUNNER_TEMP}/gh-aw/gh-aw"
         chmod +x "${RUNNER_TEMP}/gh-aw/gh-aw"
