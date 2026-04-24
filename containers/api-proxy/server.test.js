@@ -3,9 +3,10 @@
  */
 
 const http = require('http');
+const https = require('https');
 const tls = require('tls');
 const { EventEmitter } = require('events');
-const { normalizeApiTarget, deriveCopilotApiTarget, deriveGitHubApiTarget, deriveGitHubApiBasePath, normalizeBasePath, buildUpstreamPath, proxyWebSocket, resolveCopilotAuthToken, resolveOpenCodeRoute, shouldStripHeader, stripGeminiKeyParam } = require('./server');
+const { normalizeApiTarget, deriveCopilotApiTarget, deriveGitHubApiTarget, deriveGitHubApiBasePath, normalizeBasePath, buildUpstreamPath, proxyWebSocket, resolveCopilotAuthToken, resolveOpenCodeRoute, shouldStripHeader, stripGeminiKeyParam, httpProbe, validateApiKeys, keyValidationResults, resetKeyValidationState } = require('./server');
 
 describe('normalizeApiTarget', () => {
   it('should strip https:// prefix', () => {
@@ -977,5 +978,332 @@ describe('resolveOpenCodeRoute', () => {
     );
     expect(route).not.toBeNull();
     expect(route.headers['x-api-key']).toBeUndefined();
+  });
+});
+
+describe('httpProbe', () => {
+  let server;
+  let serverPort;
+
+  afterEach((done) => {
+    if (server) {
+      server.close(done);
+      server = null;
+    } else {
+      done();
+    }
+  });
+
+  function startServer(statusCode, body) {
+    return new Promise((resolve) => {
+      server = http.createServer((req, res) => {
+        res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+        res.end(body || '{}');
+      });
+      server.listen(0, '127.0.0.1', () => {
+        serverPort = server.address().port;
+        resolve();
+      });
+    });
+  }
+
+  it('should return status code 200 for a healthy endpoint', async () => {
+    await startServer(200, '{"ok":true}');
+    const status = await httpProbe(`http://127.0.0.1:${serverPort}/health`, {
+      method: 'GET',
+      headers: {},
+    }, 5000);
+    expect(status).toBe(200);
+  });
+
+  it('should return status code 401 for unauthorized', async () => {
+    await startServer(401, '{"error":"unauthorized"}');
+    const status = await httpProbe(`http://127.0.0.1:${serverPort}/models`, {
+      method: 'GET',
+      headers: { 'Authorization': 'Bearer bad-token' },
+    }, 5000);
+    expect(status).toBe(401);
+  });
+
+  it('should return status code 400 for bad request (Anthropic key valid probe)', async () => {
+    await startServer(400, '{"error":"bad request"}');
+    const status = await httpProbe(`http://127.0.0.1:${serverPort}/v1/messages`, {
+      method: 'POST',
+      headers: { 'x-api-key': 'test-key', 'content-type': 'application/json' },
+      body: '{}',
+    }, 5000);
+    expect(status).toBe(400);
+  });
+
+  it('should reject on connection refused', async () => {
+    // Allocate a port, then close it — guarantees nothing is listening
+    const tmpServer = http.createServer();
+    const refusedPort = await new Promise((resolve) => {
+      tmpServer.listen(0, '127.0.0.1', () => {
+        resolve(tmpServer.address().port);
+        tmpServer.close();
+      });
+    });
+    await expect(
+      httpProbe(`http://127.0.0.1:${refusedPort}/health`, {
+        method: 'GET',
+        headers: {},
+      }, 5000)
+    ).rejects.toThrow();
+  });
+
+  it('should reject on timeout', async () => {
+    // Start a server that never responds
+    server = http.createServer(() => {
+      // intentionally never respond
+    });
+    await new Promise((resolve) => {
+      server.listen(0, '127.0.0.1', () => {
+        serverPort = server.address().port;
+        resolve();
+      });
+    });
+
+    await expect(
+      httpProbe(`http://127.0.0.1:${serverPort}/slow`, {
+        method: 'GET',
+        headers: {},
+      }, 100) // 100ms timeout
+    ).rejects.toThrow(/timed out/i);
+  });
+});
+
+// ── Helpers for validateApiKeys tests ──────────────────────────────────────────
+
+/**
+ * Create a mock https.request implementation that responds with the given status code.
+ */
+function mockHttpsRequestWithStatus(statusCode) {
+  return jest.spyOn(https, 'request').mockImplementation((options, callback) => {
+    const req = new EventEmitter();
+    req.write = jest.fn();
+    req.end = jest.fn(() => {
+      setImmediate(() => {
+        const res = new EventEmitter();
+        res.statusCode = statusCode;
+        res.resume = jest.fn();
+        callback(res);
+        setImmediate(() => res.emit('end'));
+      });
+    });
+    req.destroy = jest.fn();
+    return req;
+  });
+}
+
+/**
+ * Collect structured log lines emitted by logRequest() (written to process.stdout).
+ */
+function collectLogOutput() {
+  const lines = [];
+  const spy = jest.spyOn(process.stdout, 'write').mockImplementation((data) => {
+    try {
+      lines.push(JSON.parse(data.toString()));
+    } catch {
+      // ignore non-JSON writes
+    }
+    return true;
+  });
+  return { lines, spy };
+}
+
+describe('validateApiKeys', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+    resetKeyValidationState();
+  });
+
+  // ── OpenAI ─────────────────────────────────────────────────────────────────
+
+  it('marks OpenAI valid when probe returns 200', async () => {
+    const { lines } = collectLogOutput();
+    mockHttpsRequestWithStatus(200);
+    await validateApiKeys({ openaiKey: 'sk-test', openaiTarget: 'api.openai.com' });
+    expect(keyValidationResults.openai.status).toBe('valid');
+    const log = lines.find(l => l.provider === 'openai' && l.status === 'valid');
+    expect(log).toBeDefined();
+  });
+
+  it('marks OpenAI auth_rejected when probe returns 401', async () => {
+    const { lines } = collectLogOutput();
+    mockHttpsRequestWithStatus(401);
+    await validateApiKeys({ openaiKey: 'sk-bad', openaiTarget: 'api.openai.com' });
+    expect(keyValidationResults.openai.status).toBe('auth_rejected');
+    const failLog = lines.find(l => l.event === 'key_validation_failed' && l.provider === 'openai');
+    expect(failLog).toBeDefined();
+    expect(failLog.level).toBe('error');
+  });
+
+  it('skips OpenAI for custom API target', async () => {
+    const { lines } = collectLogOutput();
+    await validateApiKeys({ openaiKey: 'sk-test', openaiTarget: 'my-llm-router.internal' });
+    expect(keyValidationResults.openai.status).toBe('skipped');
+    const log = lines.find(l => l.provider === 'openai' && l.status === 'skipped');
+    expect(log).toBeDefined();
+  });
+
+  it('does not validate OpenAI when key is not provided', async () => {
+    collectLogOutput();
+    const spy = jest.spyOn(https, 'request');
+    await validateApiKeys({ openaiKey: undefined });
+    expect(keyValidationResults.openai).toBeUndefined();
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  // ── Anthropic ──────────────────────────────────────────────────────────────
+
+  it('marks Anthropic valid when probe returns 400 (key valid, body incomplete)', async () => {
+    const { lines } = collectLogOutput();
+    mockHttpsRequestWithStatus(400);
+    await validateApiKeys({ anthropicKey: 'sk-ant-test', anthropicTarget: 'api.anthropic.com' });
+    expect(keyValidationResults.anthropic.status).toBe('valid');
+    const log = lines.find(l => l.provider === 'anthropic' && l.status === 'valid');
+    expect(log).toBeDefined();
+    expect(log.note).toContain('probe body rejected');
+  });
+
+  it('marks Anthropic auth_rejected when probe returns 401', async () => {
+    const { lines } = collectLogOutput();
+    mockHttpsRequestWithStatus(401);
+    await validateApiKeys({ anthropicKey: 'sk-ant-bad', anthropicTarget: 'api.anthropic.com' });
+    expect(keyValidationResults.anthropic.status).toBe('auth_rejected');
+    const failLog = lines.find(l => l.event === 'key_validation_failed' && l.provider === 'anthropic');
+    expect(failLog).toBeDefined();
+  });
+
+  it('marks Anthropic auth_rejected when probe returns 403', async () => {
+    mockHttpsRequestWithStatus(403);
+    await validateApiKeys({ anthropicKey: 'sk-ant-bad', anthropicTarget: 'api.anthropic.com' });
+    expect(keyValidationResults.anthropic.status).toBe('auth_rejected');
+  });
+
+  it('skips Anthropic for custom API target', async () => {
+    const { lines } = collectLogOutput();
+    await validateApiKeys({ anthropicKey: 'sk-ant-test', anthropicTarget: 'proxy.corp.internal' });
+    expect(keyValidationResults.anthropic.status).toBe('skipped');
+    const log = lines.find(l => l.provider === 'anthropic' && l.status === 'skipped');
+    expect(log).toBeDefined();
+  });
+
+  // ── Copilot ────────────────────────────────────────────────────────────────
+
+  it('marks Copilot valid when probe returns 200 with non-classic token', async () => {
+    const { lines } = collectLogOutput();
+    mockHttpsRequestWithStatus(200);
+    await validateApiKeys({
+      copilotGithubToken: 'ghu_valid_token',
+      copilotTarget: 'api.githubcopilot.com',
+      copilotIntegrationId: 'copilot-developer-cli',
+    });
+    expect(keyValidationResults.copilot.status).toBe('valid');
+    const log = lines.find(l => l.provider === 'copilot' && l.status === 'valid');
+    expect(log).toBeDefined();
+  });
+
+  it('marks Copilot auth_rejected when probe returns 401', async () => {
+    const { lines } = collectLogOutput();
+    mockHttpsRequestWithStatus(401);
+    await validateApiKeys({
+      copilotGithubToken: 'ghu_invalid',
+      copilotTarget: 'api.githubcopilot.com',
+      copilotIntegrationId: 'copilot-developer-cli',
+    });
+    expect(keyValidationResults.copilot.status).toBe('auth_rejected');
+    const failLog = lines.find(l => l.event === 'key_validation_failed' && l.provider === 'copilot');
+    expect(failLog).toBeDefined();
+  });
+
+  it('skips Copilot for custom API target', async () => {
+    const { lines } = collectLogOutput();
+    await validateApiKeys({
+      copilotGithubToken: 'ghu_valid',
+      copilotTarget: 'copilot-api.mycompany.ghe.com',
+      copilotIntegrationId: 'copilot-developer-cli',
+    });
+    expect(keyValidationResults.copilot.status).toBe('skipped');
+    const log = lines.find(l => l.provider === 'copilot' && l.status === 'skipped');
+    expect(log).toBeDefined();
+  });
+
+  it('skips Copilot when only COPILOT_API_KEY is set (BYOK mode)', async () => {
+    collectLogOutput();
+    const spy = jest.spyOn(https, 'request');
+    await validateApiKeys({
+      copilotGithubToken: undefined,
+      copilotApiKey: 'sk-byok-key',
+      copilotTarget: 'api.githubcopilot.com',
+    });
+    expect(keyValidationResults.copilot.status).toBe('skipped');
+    expect(keyValidationResults.copilot.message).toContain('COPILOT_API_KEY');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  // ── Gemini ─────────────────────────────────────────────────────────────────
+
+  it('marks Gemini valid when probe returns 200', async () => {
+    const { lines } = collectLogOutput();
+    mockHttpsRequestWithStatus(200);
+    await validateApiKeys({ geminiKey: 'ai-test-key', geminiTarget: 'generativelanguage.googleapis.com' });
+    expect(keyValidationResults.gemini.status).toBe('valid');
+    const log = lines.find(l => l.provider === 'gemini' && l.status === 'valid');
+    expect(log).toBeDefined();
+  });
+
+  it('marks Gemini auth_rejected when probe returns 403', async () => {
+    mockHttpsRequestWithStatus(403);
+    await validateApiKeys({ geminiKey: 'ai-bad-key', geminiTarget: 'generativelanguage.googleapis.com' });
+    expect(keyValidationResults.gemini.status).toBe('auth_rejected');
+  });
+
+  it('skips Gemini for custom API target', async () => {
+    const { lines } = collectLogOutput();
+    await validateApiKeys({ geminiKey: 'ai-test', geminiTarget: 'my-vertex-endpoint.internal' });
+    expect(keyValidationResults.gemini.status).toBe('skipped');
+    const log = lines.find(l => l.provider === 'gemini' && l.status === 'skipped');
+    expect(log).toBeDefined();
+  });
+
+  // ── Cross-cutting ──────────────────────────────────────────────────────────
+
+  it('handles network_error when probe times out', async () => {
+    collectLogOutput();
+    jest.spyOn(https, 'request').mockImplementation((options, callback) => {
+      const req = new EventEmitter();
+      req.write = jest.fn();
+      req.end = jest.fn(); // never responds
+      req.destroy = jest.fn((err) => {
+        setImmediate(() => req.emit('error', err || new Error('socket hang up')));
+      });
+      // Simulate Node's built-in timeout: fire 'timeout' event after the requested delay
+      if (options.timeout) {
+        setTimeout(() => req.emit('timeout'), options.timeout);
+      }
+      return req;
+    });
+    await validateApiKeys({
+      openaiKey: 'sk-test',
+      openaiTarget: 'api.openai.com',
+      timeoutMs: 50,
+    });
+    expect(keyValidationResults.openai.status).toBe('network_error');
+  }, 5000);
+
+  it('does not validate any provider when no keys are provided', async () => {
+    collectLogOutput();
+    const spy = jest.spyOn(https, 'request');
+    await validateApiKeys({
+      openaiKey: undefined,
+      anthropicKey: undefined,
+      copilotGithubToken: undefined,
+      copilotApiKey: undefined,
+      geminiKey: undefined,
+    });
+    expect(Object.keys(keyValidationResults)).toHaveLength(0);
+    expect(spy).not.toHaveBeenCalled();
   });
 });
