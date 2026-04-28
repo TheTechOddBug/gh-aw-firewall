@@ -8,6 +8,11 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
+sandbox:
+  agent:
+    version: v0.25.29
+  mcp:
+    version: v0.3.1
 tools:
   github:
     toolsets: [default]

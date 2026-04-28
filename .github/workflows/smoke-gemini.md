@@ -40,6 +40,11 @@ secrets:
     value: ${{ secrets.GEMINI_API_KEY }}
     description: "Google Gemini API key for inference"
 timeout-minutes: 5
+sandbox:
+  agent:
+    version: v0.25.29
+  mcp:
+    version: v0.3.1
 strict: true
 steps:
   - name: Pre-compute smoke test data

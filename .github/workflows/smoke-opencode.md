@@ -16,6 +16,11 @@ name: Smoke OpenCode
 engine:
   id: opencode
   model: copilot/gpt-4.1
+sandbox:
+  agent:
+    version: v0.25.29
+  mcp:
+    version: v0.3.1
 strict: true
 imports:
   - shared/gh.md
