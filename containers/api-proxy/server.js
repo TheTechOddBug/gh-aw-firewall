@@ -83,6 +83,7 @@ function resolveCopilotAuthToken(env = process.env) {
 const COPILOT_AUTH_TOKEN = resolveCopilotAuthToken(process.env);
 const COPILOT_INTEGRATION_ID = process.env.COPILOT_INTEGRATION_ID || 'copilot-developer-cli';
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || '').trim() || undefined;
+const ENABLE_OPENCODE = process.env.AWF_ENABLE_OPENCODE === 'true';
 
 /**
  * Normalizes an API target value to a bare hostname.
@@ -1504,7 +1505,7 @@ function writeModelsJson(logDir = MODELS_LOG_DIR) {
  * @returns {{ endpoints: Array<object>, models_fetch_complete: boolean, model_aliases: Record<string, string[]>|null }}
  */
 function reflectEndpoints() {
-  const opencodeConfigured = !!(OPENAI_API_KEY || ANTHROPIC_API_KEY || COPILOT_AUTH_TOKEN);
+  const opencodeConfigured = ENABLE_OPENCODE && !!(OPENAI_API_KEY || ANTHROPIC_API_KEY || COPILOT_AUTH_TOKEN);
   return {
     endpoints: [
       {
@@ -1610,7 +1611,7 @@ if (require.main === module) {
   if (ANTHROPIC_API_KEY) expectedListeners++;
   if (COPILOT_AUTH_TOKEN) expectedListeners++;
   if (GEMINI_API_KEY) expectedListeners++;
-  if (OPENAI_API_KEY || ANTHROPIC_API_KEY || COPILOT_AUTH_TOKEN) expectedListeners++; // OpenCode (10004)
+  if (ENABLE_OPENCODE && (OPENAI_API_KEY || ANTHROPIC_API_KEY || COPILOT_AUTH_TOKEN)) expectedListeners++; // OpenCode (10004)
   let readyListeners = 0;
   function onListenerReady() {
     readyListeners++;
@@ -1827,6 +1828,8 @@ if (require.main === module) {
   }
 
   // OpenCode API proxy (port 10004) — dynamic provider routing
+  // Only started when AWF_ENABLE_OPENCODE=true, so it doesn't activate
+  // unconditionally whenever any credential is present (e.g. Copilot-only runs).
   // Defaults to Copilot/OpenAI routing (OPENAI_API_KEY), with Anthropic as a BYOK fallback.
   // OpenCode gets a separate port from Claude (10001) and Codex (10000) for per-engine
   // rate limiting and metrics isolation.
@@ -1836,6 +1839,7 @@ if (require.main === module) {
   //   2. ANTHROPIC_API_KEY               → Anthropic BYOK route (ANTHROPIC_API_TARGET)
   //   3. COPILOT_GITHUB_TOKEN/API_KEY    → Copilot route (COPILOT_API_TARGET),
   //                                        resolved internally to COPILOT_AUTH_TOKEN
+  if (ENABLE_OPENCODE) {
   const opencodeStartupRoute = resolveOpenCodeRoute(
     OPENAI_API_KEY, ANTHROPIC_API_KEY, COPILOT_AUTH_TOKEN,
     OPENAI_API_TARGET, ANTHROPIC_API_TARGET, COPILOT_API_TARGET,
@@ -1912,6 +1916,7 @@ if (require.main === module) {
       onListenerReady();
     });
   }
+  } // end if (ENABLE_OPENCODE)
 
   // Graceful shutdown
   process.on('SIGTERM', async () => {

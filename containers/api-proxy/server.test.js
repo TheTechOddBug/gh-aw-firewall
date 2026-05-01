@@ -1639,14 +1639,32 @@ describe('reflectEndpoints', () => {
     expect(urlMap.opencode).toBeNull();
   });
 
-  it('should report opencode as configured when openai key is present', () => {
-    // The module-level OPENAI_API_KEY is whatever process.env had at import time.
-    // We reflect the real configured state — just verify the shape is correct.
+  it('should report opencode as not configured when AWF_ENABLE_OPENCODE is not set', () => {
+    // ENABLE_OPENCODE is false at module load time (AWF_ENABLE_OPENCODE not set in test env),
+    // so opencode.configured must always be false regardless of other credentials.
     const result = reflectEndpoints();
     const opencode = result.endpoints.find((e) => e.provider === 'opencode');
-    expect(typeof opencode.configured).toBe('boolean');
+    expect(opencode.configured).toBe(false);
     expect(opencode.models).toBeNull();
     expect(opencode.models_url).toBeNull();
+  });
+
+  it('should report opencode as configured when AWF_ENABLE_OPENCODE=true and a credential is present', () => {
+    let isolatedReflect;
+    jest.isolateModules(() => {
+      process.env.AWF_ENABLE_OPENCODE = 'true';
+      process.env.OPENAI_API_KEY = 'sk-test-isolated';
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        ({ reflectEndpoints: isolatedReflect } = require('./server'));
+      } finally {
+        delete process.env.AWF_ENABLE_OPENCODE;
+        delete process.env.OPENAI_API_KEY;
+      }
+    });
+    const result = isolatedReflect();
+    const opencode = result.endpoints.find((e) => e.provider === 'opencode');
+    expect(opencode.configured).toBe(true);
   });
 });
 
