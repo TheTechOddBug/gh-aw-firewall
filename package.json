@@ -26,7 +26,8 @@
     "docs:preview": "cd docs-site && npm run preview",
     "benchmark": "npx tsx scripts/ci/benchmark-performance.ts",
     "benchmark:trend": "npx tsx scripts/ci/benchmark-trend.ts",
-    "build:bundle": "npm run build && node scripts/build-bundle.mjs"
+    "build:bundle": "npm run build && node scripts/build-bundle.mjs",
+    "generate:schema": "node scripts/generate-schema.mjs"
   },
   "keywords": [
     "agentic-workflows",
@@ -63,6 +64,7 @@
     "@types/node": "^25.6.0",
     "@typescript-eslint/eslint-plugin": "^8.58.2",
     "@typescript-eslint/parser": "^8.58.2",
+    "ajv": "^8.18.0",
     "babel-jest": "^30.2.0",
     "esbuild": "^0.25.0",
     "eslint": "^10.2.1",
