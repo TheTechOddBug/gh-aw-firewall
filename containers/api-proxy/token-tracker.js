@@ -35,6 +35,18 @@ const TOKEN_LOG_FILE = path.join(TOKEN_LOG_DIR, 'token-usage.jsonl');
 const DIAG_LOG_FILE = path.join(TOKEN_LOG_DIR, 'token-diag.log');
 const DIAG_ENABLED = process.env.AWF_DEBUG_TOKENS === '1';
 
+// AWF version used to identify schema version in JSONL records.
+// Set to the container image version at build time via ARG AWF_VERSION in the Dockerfile
+// (baked in by the release workflow with --build-arg AWF_VERSION=<version>).
+// Falls back to "0.0.0-dev" for local/un-versioned builds.
+const AWF_VERSION = process.env.AWF_VERSION;
+if (!AWF_VERSION) {
+  // Log a warning (to stderr to avoid polluting stdout) when running without the env var.
+  // This can happen during local development or tests outside the container.
+  process.stderr.write('{"level":"warn","event":"awf_version_missing","message":"AWF_VERSION env var not set; _schema will use 0.0.0-dev"}\n');
+}
+const TOKEN_USAGE_SCHEMA = `token-usage/v${AWF_VERSION || '0.0.0-dev'}`;
+
 let logStream = null;
 let diagStream = null;
 
@@ -85,7 +97,7 @@ function getLogStream() {
 }
 
 /**
- * Validate a token usage record against the token-usage/v1 schema contract.
+ * Validate a token usage record against the token-usage schema contract.
  *
  * Checks that all required fields are present and have the expected types.
  * Logs a warning and returns false if the record is non-conformant; does
@@ -133,11 +145,11 @@ function validateTokenUsageRecord(record) {
     }
   }
 
-  if (record._schema !== 'token-usage/v1') {
+  if (!/^token-usage\/v\d+\.\d+\.\d+(-\w+)?$/.test(record._schema)) {
     logRequest('warn', 'token_record_schema_violation', {
       request_id: record.request_id,
       field: '_schema',
-      expected: 'token-usage/v1',
+      expected: 'token-usage/v<semver>',
       actual: record._schema,
     });
     return false;
@@ -148,7 +160,7 @@ function validateTokenUsageRecord(record) {
 
 /**
  * Write a token usage record to the JSONL log file.
- * Validates the record against the token-usage/v1 schema before writing.
+ * Validates the record against the token-usage schema before writing.
  * Handles backpressure by dropping writes when the stream buffer is full.
  */
 function writeTokenUsage(record) {
@@ -543,7 +555,7 @@ function trackTokenUsage(proxyRes, opts) {
 
     // Build log record
     const record = {
-      _schema: 'token-usage/v1',
+      _schema: TOKEN_USAGE_SCHEMA,
       timestamp: new Date().toISOString(),
       request_id: requestId,
       provider,
@@ -759,7 +771,7 @@ function trackWebSocketTokenUsage(upstreamSocket, opts) {
     }
 
     const record = {
-      _schema: 'token-usage/v1',
+      _schema: TOKEN_USAGE_SCHEMA,
       timestamp: new Date().toISOString(),
       request_id: requestId,
       provider,
