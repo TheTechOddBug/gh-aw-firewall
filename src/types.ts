@@ -1324,6 +1324,7 @@ export interface DockerComposeConfig {
  * configuration options used by the firewall. Services can be built locally
  * or pulled from a registry, and can have complex networking, volume mounting,
  * and dependency configurations.
+ * @internal Internal sub-type of DockerComposeConfig; subject to change with Docker Compose spec updates
  */
 export interface DockerService {
   /**
@@ -1631,6 +1632,7 @@ export interface DockerService {
  * Defines a custom Docker network or references an external network.
  * The firewall uses networks to isolate container communication and assign
  * static IP addresses for predictable iptables rules.
+ * @internal Internal sub-type of DockerComposeConfig; subject to change with Docker Compose spec updates
  */
 export interface DockerNetwork {
   /**
