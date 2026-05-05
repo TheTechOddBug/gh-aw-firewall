@@ -34,6 +34,7 @@ export interface ApiProxyServiceParams {
 export function buildApiProxyService(params: ApiProxyServiceParams): ApiProxyBuildResult {
   const { config, networkConfig, apiProxyLogsPath, imageConfig } = params;
   const { useGHCR, registry, parsedTag, projectRoot } = imageConfig;
+  const normalizedAuthType = (process.env.AWF_AUTH_TYPE || '').trim().toLowerCase();
 
   if (!networkConfig.proxyIp) {
     throw new Error('buildApiProxyService: networkConfig.proxyIp is required');
@@ -104,6 +105,20 @@ export function buildApiProxyService(params: ApiProxyServiceParams): ApiProxyBui
       }),
       // Enable OpenCode listener only when explicitly requested
       ...(config.enableOpenCode && { AWF_ENABLE_OPENCODE: 'true' }),
+      // OIDC authentication for Azure OpenAI (Entra-only deployments)
+      ...(process.env.AWF_AUTH_TYPE && { AWF_AUTH_TYPE: process.env.AWF_AUTH_TYPE }),
+      ...(process.env.AWF_AUTH_AZURE_TENANT_ID && { AWF_AUTH_AZURE_TENANT_ID: process.env.AWF_AUTH_AZURE_TENANT_ID }),
+      ...(process.env.AWF_AUTH_AZURE_CLIENT_ID && { AWF_AUTH_AZURE_CLIENT_ID: process.env.AWF_AUTH_AZURE_CLIENT_ID }),
+      ...(process.env.AWF_AUTH_OIDC_AUDIENCE && { AWF_AUTH_OIDC_AUDIENCE: process.env.AWF_AUTH_OIDC_AUDIENCE }),
+      ...(process.env.AWF_AUTH_AZURE_SCOPE && { AWF_AUTH_AZURE_SCOPE: process.env.AWF_AUTH_AZURE_SCOPE }),
+      ...(process.env.AWF_AUTH_AZURE_CLOUD && { AWF_AUTH_AZURE_CLOUD: process.env.AWF_AUTH_AZURE_CLOUD }),
+      // GitHub Actions OIDC runtime tokens (needed by OIDC token provider in api-proxy)
+      ...(normalizedAuthType === 'github-oidc' && process.env.ACTIONS_ID_TOKEN_REQUEST_URL && {
+        ACTIONS_ID_TOKEN_REQUEST_URL: process.env.ACTIONS_ID_TOKEN_REQUEST_URL,
+      }),
+      ...(normalizedAuthType === 'github-oidc' && process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN && {
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN: process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+      }),
       // Anthropic request optimisations (all opt-in via env vars on the host)
       ...(process.env.AWF_ANTHROPIC_AUTO_CACHE && { AWF_ANTHROPIC_AUTO_CACHE: process.env.AWF_ANTHROPIC_AUTO_CACHE }),
       ...(process.env.AWF_ANTHROPIC_CACHE_TAIL_TTL && { AWF_ANTHROPIC_CACHE_TAIL_TTL: process.env.AWF_ANTHROPIC_CACHE_TAIL_TTL }),
