@@ -154,6 +154,13 @@ function createCopilotAdapter(env, deps = {}) {
 
   const bodyTransform = deps.bodyTransform || null;
 
+  // Pre-computed models path used by getModelsFetchConfig and getReflectionInfo.
+  // For BYOK/custom providers the base path prefix is included (e.g. /api/v1/models
+  // for COPILOT_PROVIDER_BASE_URL=https://openrouter.ai/api/v1).
+  // A basePath of '/' (normalizeBasePath returns '/') is treated as no prefix to
+  // avoid producing '//models'.
+  const modelsPath = (basePath && basePath !== '/') ? `${basePath}/models` : '/models';
+
   return {
     name: 'copilot',
     port: 10002,
@@ -237,15 +244,37 @@ function createCopilotAdapter(env, deps = {}) {
     },
 
     getModelsFetchConfig() {
-      // Only COPILOT_GITHUB_TOKEN is accepted by the /models endpoint
-      if (!githubToken) return null;
+      if (!authToken) return null;
+
+      // Standard Copilot API (api.githubcopilot.com):
+      // The /models endpoint only accepts GitHub OAuth tokens (COPILOT_GITHUB_TOKEN).
+      // Skip startup model fetch when only a BYOK API key is configured.
+      if (rawTarget === 'api.githubcopilot.com') {
+        if (!githubToken) return null;
+        return {
+          url: `https://${rawTarget}/models`,
+          opts: {
+            method: 'GET',
+            headers: {
+              'Authorization': `Bearer ${githubToken}`,
+              'Copilot-Integration-Id': integrationId,
+            },
+          },
+          cacheKey: 'copilot',
+        };
+      }
+
+      // BYOK / custom provider (e.g. OpenRouter):
+      // Use the explicit BYOK API key (COPILOT_API_KEY) rather than authToken
+      // to ensure we never send a GitHub OAuth token to third-party providers.
+      // Skip the fetch when no BYOK key is configured.
+      if (!apiKey) return null;
       return {
-        url: `https://${rawTarget}/models`,
+        url: `https://${rawTarget}${modelsPath}`,
         opts: {
           method: 'GET',
           headers: {
-            'Authorization': `Bearer ${githubToken}`,
-            'Copilot-Integration-Id': integrationId,
+            'Authorization': `Bearer ${apiKey}`,
           },
         },
         cacheKey: 'copilot',
@@ -253,13 +282,16 @@ function createCopilotAdapter(env, deps = {}) {
     },
 
     getReflectionInfo() {
+      // For BYOK / custom providers, include the base path in the models URL so
+      // that clients (e.g. the gh-aw framework) use the correct endpoint to
+      // discover available models (e.g. /api/v1/models for OpenRouter).
       return {
         provider: 'copilot',
         port: 10002,
         base_url: 'http://api-proxy:10002',
         configured: !!authToken,
         models_cache_key: 'copilot',
-        models_url: 'http://api-proxy:10002/models',
+        models_url: `http://api-proxy:10002${modelsPath}`,
       };
     },
 

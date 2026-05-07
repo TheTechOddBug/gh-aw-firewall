@@ -569,6 +569,18 @@ describe('fetchStartupModels', () => {
     expect(cachedModels.copilot).toBeUndefined();
   });
 
+  it('should populate cachedModels.copilot when BYOK key + custom provider target (adapter-based path)', async () => {
+    mockHttpsRequestWithBody(200, '{"data":[{"id":"minimax/minimax-m2.5:free"},{"id":"openai/gpt-4o"}]}');
+    const adapter = createCopilotAdapter({
+      COPILOT_API_KEY: 'sk-or-byok-key',
+      COPILOT_API_TARGET: 'openrouter.ai',
+      COPILOT_API_BASE_PATH: '/api/v1',
+    });
+    await fetchStartupModels([adapter]);
+    // Models from the custom BYOK provider should be cached
+    expect(cachedModels.copilot).toEqual(['minimax/minimax-m2.5:free', 'openai/gpt-4o']);
+  });
+
   it('should skip fetching when no keys are configured', async () => {
     const spy = jest.spyOn(https, 'request');
     await fetchStartupModels({
@@ -1505,6 +1517,129 @@ describe('provider adapter alwaysBind', () => {
     const { statusCode, body } = adapter.getUnconfiguredHealthResponse();
     expect(statusCode).toBe(503);
     expect(body.error).toMatch(/no candidate provider credentials/);
+  });
+});
+
+// ── Copilot adapter BYOK model fetch ──────────────────────────────────────────
+//
+// These tests verify that the Copilot adapter fetches models from a custom
+// BYOK provider (e.g. OpenRouter) at startup, and that the reflect response
+// includes the correct base-path-aware models URL.
+//
+
+describe('copilot adapter BYOK model fetch', () => {
+  it('getModelsFetchConfig returns null for BYOK key on standard Copilot API (no GitHub token)', () => {
+    const adapter = createCopilotAdapter({
+      COPILOT_API_KEY: 'sk-byok-key',
+      COPILOT_API_TARGET: 'api.githubcopilot.com',
+    });
+    expect(adapter.getModelsFetchConfig()).toBeNull();
+  });
+
+  it('getModelsFetchConfig returns fetch config for BYOK key on custom target', () => {
+    const adapter = createCopilotAdapter({
+      COPILOT_API_KEY: 'sk-or-key',
+      COPILOT_API_TARGET: 'openrouter.ai',
+      COPILOT_API_BASE_PATH: '/api/v1',
+    });
+    const config = adapter.getModelsFetchConfig();
+    expect(config).not.toBeNull();
+    expect(config.url).toBe('https://openrouter.ai/api/v1/models');
+    expect(config.opts.method).toBe('GET');
+    expect(config.opts.headers['Authorization']).toBe('Bearer sk-or-key');
+    expect(config.cacheKey).toBe('copilot');
+  });
+
+  it('getModelsFetchConfig uses github token for standard Copilot API target', () => {
+    const adapter = createCopilotAdapter({
+      COPILOT_GITHUB_TOKEN: 'ghu_token',
+    });
+    const config = adapter.getModelsFetchConfig();
+    expect(config).not.toBeNull();
+    expect(config.url).toBe('https://api.githubcopilot.com/models');
+    expect(config.opts.headers['Authorization']).toBe('Bearer ghu_token');
+    expect(config.opts.headers['Copilot-Integration-Id']).toBeDefined();
+    expect(config.cacheKey).toBe('copilot');
+  });
+
+  it('getModelsFetchConfig returns null when no auth token is configured', () => {
+    const adapter = createCopilotAdapter({});
+    expect(adapter.getModelsFetchConfig()).toBeNull();
+  });
+
+  it('getModelsFetchConfig uses /models directly when basePath is not configured', () => {
+    // When no basePath is set, /models is used directly (no prefix)
+    const adapter = createCopilotAdapter({
+      COPILOT_API_KEY: 'sk-custom-key',
+      COPILOT_API_TARGET: 'custom.llm.example.com',
+    });
+    const config = adapter.getModelsFetchConfig();
+    expect(config).not.toBeNull();
+    expect(config.url).toBe('https://custom.llm.example.com/models');
+  });
+
+  it('getModelsFetchConfig uses /models (not //models) when basePath is "/"', () => {
+    // normalizeBasePath('/') returns '/' — ensure we don't produce //models
+    const adapter = createCopilotAdapter({
+      COPILOT_API_KEY: 'sk-custom-key',
+      COPILOT_API_TARGET: 'custom.llm.example.com',
+      COPILOT_API_BASE_PATH: '/',
+    });
+    const config = adapter.getModelsFetchConfig();
+    expect(config).not.toBeNull();
+    expect(config.url).toBe('https://custom.llm.example.com/models');
+    expect(config.url).not.toContain('//models');
+  });
+
+  it('getModelsFetchConfig uses COPILOT_API_KEY (not GitHub token) for custom targets even when both are set', () => {
+    // Verify that the GitHub OAuth token is never sent to third-party BYOK providers
+    const adapter = createCopilotAdapter({
+      COPILOT_GITHUB_TOKEN: 'ghu_github_token',
+      COPILOT_API_KEY: 'sk-byok-key',
+      COPILOT_API_TARGET: 'openrouter.ai',
+      COPILOT_API_BASE_PATH: '/api/v1',
+    });
+    const config = adapter.getModelsFetchConfig();
+    expect(config).not.toBeNull();
+    expect(config.opts.headers['Authorization']).toBe('Bearer sk-byok-key');
+    expect(config.opts.headers['Authorization']).not.toContain('ghu_github_token');
+  });
+
+  it('getModelsFetchConfig returns null for custom target when only github token is set (no BYOK key)', () => {
+    // Without an explicit COPILOT_API_KEY there is nothing to authenticate with
+    // at the custom provider — skip the fetch rather than forward the GitHub token.
+    const adapter = createCopilotAdapter({
+      COPILOT_GITHUB_TOKEN: 'ghu_token',
+      COPILOT_API_TARGET: 'openrouter.ai',
+    });
+    expect(adapter.getModelsFetchConfig()).toBeNull();
+  });
+
+  it('getReflectionInfo includes /models for standard Copilot API (no base path)', () => {
+    const adapter = createCopilotAdapter({ COPILOT_GITHUB_TOKEN: 'ghu_token' });
+    const info = adapter.getReflectionInfo();
+    expect(info.models_url).toBe('http://api-proxy:10002/models');
+  });
+
+  it('getReflectionInfo includes base path in models_url for BYOK providers', () => {
+    const adapter = createCopilotAdapter({
+      COPILOT_API_KEY: 'sk-or-key',
+      COPILOT_API_TARGET: 'openrouter.ai',
+      COPILOT_API_BASE_PATH: '/api/v1',
+    });
+    const info = adapter.getReflectionInfo();
+    expect(info.models_url).toBe('http://api-proxy:10002/api/v1/models');
+  });
+
+  it('getReflectionInfo uses /models (not //models) when basePath is "/"', () => {
+    const adapter = createCopilotAdapter({
+      COPILOT_API_KEY: 'sk-or-key',
+      COPILOT_API_TARGET: 'openrouter.ai',
+      COPILOT_API_BASE_PATH: '/',
+    });
+    const info = adapter.getReflectionInfo();
+    expect(info.models_url).toBe('http://api-proxy:10002/models');
+    expect(info.models_url).not.toContain('//models');
   });
 });
 
