@@ -207,6 +207,24 @@ function createDecompressor(headers) {
 }
 
 /**
+ * Extract reasoning token count from provider usage payloads.
+ *
+ * Supports explicit `reasoning_tokens` and provider-specific nested fields.
+ * Priority order: top-level → completion_tokens_details → output_tokens_details.
+ */
+function extractReasoningTokens(usage) {
+  if (!usage || typeof usage !== 'object') return undefined;
+  if (typeof usage.reasoning_tokens === 'number') return usage.reasoning_tokens;
+  if (usage.completion_tokens_details && typeof usage.completion_tokens_details.reasoning_tokens === 'number') {
+    return usage.completion_tokens_details.reasoning_tokens;
+  }
+  if (usage.output_tokens_details && typeof usage.output_tokens_details.reasoning_tokens === 'number') {
+    return usage.output_tokens_details.reasoning_tokens;
+  }
+  return undefined;
+}
+
+/**
  * Extract token usage from a non-streaming JSON response body.
  *
  * Supports:
@@ -255,6 +273,11 @@ function extractUsageFromJson(body) {
       }
       if (typeof json.usage.total_tokens === 'number') {
         usage.total_tokens = json.usage.total_tokens;
+        hasField = true;
+      }
+      const reasoningTokens = extractReasoningTokens(json.usage);
+      if (typeof reasoningTokens === 'number') {
+        usage.reasoning_tokens = reasoningTokens;
         hasField = true;
       }
       // OpenAI/Copilot nested cache fields (prompt_tokens_details.cached_tokens)
@@ -319,6 +342,10 @@ function extractUsageFromSseLine(line) {
       if (typeof json.usage.prompt_tokens === 'number') result.usage.prompt_tokens = json.usage.prompt_tokens;
       if (typeof json.usage.completion_tokens === 'number') result.usage.completion_tokens = json.usage.completion_tokens;
       if (typeof json.usage.total_tokens === 'number') result.usage.total_tokens = json.usage.total_tokens;
+      const reasoningTokens = extractReasoningTokens(json.usage);
+      if (typeof reasoningTokens === 'number') {
+        result.usage.reasoning_tokens = reasoningTokens;
+      }
       // OpenAI/Copilot nested cache fields (prompt_tokens_details.cached_tokens)
       if (json.usage.prompt_tokens_details && typeof json.usage.prompt_tokens_details.cached_tokens === 'number') {
         result.usage.cache_read_input_tokens = json.usage.prompt_tokens_details.cached_tokens;
@@ -367,6 +394,7 @@ function normalizeUsage(usage) {
     output_tokens: usage.output_tokens ?? usage.completion_tokens ?? 0,
     cache_read_tokens: usage.cache_read_input_tokens ?? 0,
     cache_write_tokens: usage.cache_creation_input_tokens ?? 0,
+    reasoning_tokens: usage.reasoning_tokens ?? 0,
   };
 }
 
@@ -390,9 +418,10 @@ function normalizeUsage(usage) {
  * @param {object} opts.metrics - Metrics module reference
  * @param {object|null} opts.billingInfo - Extracted billing/quota headers from response
  * @param {string|null} opts.initiatorSent - X-Initiator value sent on the request
+ * @param {(normalizedUsage: object, model: string|null) => void} [opts.onUsage] - Optional callback invoked after normalized usage is extracted
  */
 function trackTokenUsage(proxyRes, opts) {
-  const { requestId, provider, path: reqPath, startTime, metrics: metricsRef, billingInfo, initiatorSent } = opts;
+  const { requestId, provider, path: reqPath, startTime, metrics: metricsRef, billingInfo, initiatorSent, onUsage } = opts;
   const streaming = isStreamingResponse(proxyRes.headers);
   const contentType = proxyRes.headers['content-type'] || '(none)';
   const contentEncoding = proxyRes.headers['content-encoding'] || '(none)';
@@ -548,6 +577,13 @@ function trackTokenUsage(proxyRes, opts) {
 
     const normalized = normalizeUsage(usage);
     if (!normalized) return;
+    if (typeof onUsage === 'function') {
+      try {
+        onUsage(normalized, model || 'unknown');
+      } catch {
+        // best-effort callback
+      }
+    }
 
     // Update metrics
     if (metricsRef) {
@@ -680,9 +716,10 @@ function parseWebSocketFrames(buf) {
  * @param {string} opts.path - Request path
  * @param {number} opts.startTime - Request start time (Date.now())
  * @param {object} opts.metrics - Metrics module reference
+ * @param {(normalizedUsage: object, model: string|null) => void} [opts.onUsage] - Optional callback invoked after normalized usage is extracted
  */
 function trackWebSocketTokenUsage(upstreamSocket, opts) {
-  const { requestId, provider, path: reqPath, startTime, metrics: metricsRef } = opts;
+  const { requestId, provider, path: reqPath, startTime, metrics: metricsRef, onUsage } = opts;
 
   logRequest('debug', 'ws_token_track_start', {
     request_id: requestId,
@@ -770,6 +807,13 @@ function trackWebSocketTokenUsage(upstreamSocket, opts) {
     const duration = Date.now() - startTime;
     const normalized = normalizeUsage(streamingUsage);
     if (!normalized) return;
+    if (typeof onUsage === 'function') {
+      try {
+        onUsage(normalized, streamingModel || 'unknown');
+      } catch {
+        // best-effort callback
+      }
+    }
 
     if (metricsRef) {
       metricsRef.increment('input_tokens_total', { provider }, normalized.input_tokens);

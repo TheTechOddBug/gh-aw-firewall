@@ -576,6 +576,15 @@ program
     // Model aliases may be injected via config file (not a Commander option),
     // so access through a Record cast with a proper type annotation.
     const modelAliases = (options as Record<string, unknown>).modelAliases as Record<string, string[]> | undefined;
+    const maxEffectiveTokensOption = (options as Record<string, unknown>).maxEffectiveTokens as string | number | undefined;
+    const effectiveTokenModelMultipliers =
+      (options as Record<string, unknown>).effectiveTokenModelMultipliers as Record<string, number> | undefined;
+    const maxEffectiveTokens = maxEffectiveTokensOption !== undefined ? Number(maxEffectiveTokensOption) : undefined;
+
+    if (maxEffectiveTokens !== undefined && (!Number.isInteger(maxEffectiveTokens) || maxEffectiveTokens <= 0)) {
+      console.error('Error: Invalid maxEffectiveTokens value (must be a positive integer)');
+      process.exit(1);
+    }
 
     logger.setLevel(logLevel);
 
@@ -919,6 +928,8 @@ program
       anthropicAutoCache: options.anthropicAutoCache,
       anthropicCacheTailTtl: options.anthropicCacheTailTtl,
       modelAliases,
+      maxEffectiveTokens,
+      effectiveTokenModelMultipliers,
       openaiApiKey: process.env.OPENAI_API_KEY,
       anthropicApiKey: process.env.ANTHROPIC_API_KEY,
       copilotGithubToken: process.env.COPILOT_GITHUB_TOKEN,
