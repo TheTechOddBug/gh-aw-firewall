@@ -10,6 +10,7 @@ import { WrapperConfig } from '../types';
 interface AgentVolumesParams {
   config: WrapperConfig;
   sslConfig?: SslConfig;
+  projectRoot: string;
   effectiveHome: string;
   workspaceDir: string;
   agentLogsPath: string;
@@ -84,7 +85,7 @@ function resolveDockerSocketPath(config: WrapperConfig): string {
  * Builds the volume mount list for the agent container.
  */
 export function buildAgentVolumes(params: AgentVolumesParams): string[] {
-  const { config, sslConfig, effectiveHome, workspaceDir, agentLogsPath, sessionStatePath, initSignalDir } = params;
+  const { config, sslConfig, projectRoot, effectiveHome, workspaceDir, agentLogsPath, sessionStatePath, initSignalDir } = params;
 
   const agentVolumes: string[] = [
     // Essential mounts that are always included
@@ -99,6 +100,17 @@ export function buildAgentVolumes(params: AgentVolumesParams): string[] {
     // Init signal volume for iptables init container coordination
     `${initSignalDir}:/tmp/awf-init:rw`,
   ];
+
+  if (config.enableApiProxy) {
+    const healthCheckScript = path.resolve(projectRoot, 'containers/agent/api-proxy-health-check.sh');
+    try {
+      if (fs.statSync(healthCheckScript).isFile()) {
+        agentVolumes.push(`${healthCheckScript}:/usr/local/bin/api-proxy-health-check.sh:ro`);
+      }
+    } catch {
+      // Optional mount — skip if the source file is unavailable.
+    }
+  }
 
   // Volume mounts for chroot /host to work properly with host binaries
   logger.debug('Using selective path mounts for security');
