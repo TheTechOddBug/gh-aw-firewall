@@ -744,6 +744,7 @@ sudo -E awf --enable-api-proxy \
 | `ANTHROPIC_API_KEY` | Anthropic / Claude |
 | `COPILOT_GITHUB_TOKEN` | GitHub Copilot |
 | `COPILOT_API_KEY` | GitHub Copilot (BYOK) |
+| `GEMINI_API_KEY` | Google Gemini |
 
 **Sidecar ports:**
 
@@ -752,7 +753,7 @@ sudo -E awf --enable-api-proxy \
 | `10000` | OpenAI |
 | `10001` | Anthropic |
 | `10002` | GitHub Copilot |
-| `10004` | OpenCode |
+| `10003` | Google Gemini |
 
 :::tip
 Use `sudo -E` to preserve environment variables like API keys through sudo.
