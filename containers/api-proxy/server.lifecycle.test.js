@@ -552,6 +552,64 @@ describe('provider adapter alwaysBind', () => {
     expect(body.error).toMatch(/ANTHROPIC_API_KEY/);
   });
 
+  it('anthropic OIDC reports disabled until token is initialized', () => {
+    const adapter = createAnthropicAdapter({
+      AWF_AUTH_TYPE: 'github-oidc',
+      AWF_AUTH_PROVIDER: 'anthropic',
+      ACTIONS_ID_TOKEN_REQUEST_URL: 'http://localhost/token',
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'test-token',
+    });
+
+    expect(adapter.isEnabled()).toBe(false);
+    expect(adapter.getOidcProvider()).not.toBeNull();
+    expect(adapter.getValidationProbe()).toEqual({ skip: true, reason: 'OIDC auth; validation via token acquisition' });
+    expect(adapter.getModelsFetchConfig()).toBeNull();
+    expect(adapter.getReflectionInfo().configured).toBe(true);
+    expect(adapter.getReflectionInfo().auth_type).toBe('github-oidc/anthropic');
+    expect(adapter.getUnconfiguredResponse()).toEqual({
+      statusCode: 503,
+      body: { error: 'Anthropic OIDC token unavailable; retry shortly' },
+    });
+    expect(adapter.getUnconfiguredHealthResponse()).toEqual({
+      statusCode: 503,
+      body: {
+        status: 'unavailable',
+        service: 'awf-api-proxy-anthropic',
+        error: 'Anthropic OIDC token unavailable; retry shortly',
+      },
+    });
+
+    adapter.getOidcProvider().shutdown();
+  });
+
+  it('anthropic OIDC reports a clear error when Actions OIDC env is missing', () => {
+    const adapter = createAnthropicAdapter({
+      AWF_AUTH_TYPE: 'github-oidc',
+      AWF_AUTH_PROVIDER: 'anthropic',
+    });
+
+    expect(adapter.getOidcProvider()).toBeNull();
+    expect(adapter.isEnabled()).toBe(false);
+    expect(adapter.getReflectionInfo().configured).toBe(true);
+    expect(adapter.getReflectionInfo().auth_type).toBe('github-oidc/anthropic');
+    expect(adapter.getValidationProbe()).toBeNull();
+    expect(adapter.getModelsFetchConfig()).toBeNull();
+    expect(adapter.getUnconfiguredResponse()).toEqual({
+      statusCode: 503,
+      body: {
+        error: 'Anthropic OIDC requires ACTIONS_ID_TOKEN_REQUEST_URL and ACTIONS_ID_TOKEN_REQUEST_TOKEN (permissions: id-token: write).',
+      },
+    });
+    expect(adapter.getUnconfiguredHealthResponse()).toEqual({
+      statusCode: 503,
+      body: {
+        status: 'unavailable',
+        service: 'awf-api-proxy-anthropic',
+        error: 'Anthropic OIDC requires ACTIONS_ID_TOKEN_REQUEST_URL and ACTIONS_ID_TOKEN_REQUEST_TOKEN (permissions: id-token: write).',
+      },
+    });
+  });
+
   it('copilot getUnconfiguredResponse returns 503 with structured error', () => {
     const adapter = createCopilotAdapter({});
     const { statusCode, body } = adapter.getUnconfiguredResponse();

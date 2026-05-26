@@ -413,6 +413,11 @@ exchange protocol. A conforming implementation MUST:
    automatically by the Actions runner when the workflow declares
    `permissions: id-token: write`.
 
+   If OIDC is requested for a provider but these runtime variables are not
+   present in the sidecar environment, the provider adapter MUST fail closed
+   and return an explicit configuration error (rather than falling back to
+   static-key mode).
+
 3. NOT expose the exchanged provider token in the agent container
    environment. The sidecar SHALL inject it into upstream request headers.
 
@@ -480,6 +485,17 @@ exchange:
 When `gcpServiceAccount` is omitted, only step 1 is performed and the
 federated token is used directly. This requires that the federated
 principal has direct access grants on the target resource.
+
+#### 9.5.4 Anthropic Provider (`provider: anthropic`)
+
+Exchanges the GitHub OIDC JWT for an Anthropic Workload Identity Federation
+token via `https://api.anthropic.com/v1/oauth/token`. The sidecar injects
+the resulting token as an `Authorization` header on upstream requests.
+
+Anthropic requires no provider-specific environment variables beyond the
+common OIDC settings.
+
+Default OIDC audience: `https://api.anthropic.com`
 
 ### 9.6 DIFC Proxy Credential Isolation
 

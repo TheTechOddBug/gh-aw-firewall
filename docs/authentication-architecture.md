@@ -11,7 +11,7 @@ All LLM providers use identical credential isolation architecture. API keys are 
 | Port  | Provider           | Auth header                     |
 |-------|--------------------|---------------------------------|
 | 10000 | OpenAI             | `Authorization: Bearer`         |
-| 10001 | Anthropic (Claude) | `x-api-key`                     |
+| 10001 | Anthropic (Claude) | `x-api-key` (static) or `Authorization: Bearer` (OIDC) |
 | 10002 | GitHub Copilot     | `Authorization: Bearer`         |
 | 10003 | Google Gemini      | `x-goog-api-key`                |
 :::
@@ -172,6 +172,8 @@ http.createServer((req, res) => {
   proxyRequest(req, res, 'api.anthropic.com', anthropicHeaders);
 });
 ```
+
+In OIDC mode (`AWF_AUTH_TYPE=github-oidc`, `AWF_AUTH_PROVIDER=anthropic`), the sidecar injects the exchanged OAuth access token in the `Authorization` header instead of `x-api-key`.
 
 #### Port 10002: GitHub Copilot proxy
 
@@ -594,7 +596,7 @@ AWF moves the entire OIDC exchange into the api-proxy sidecar, so the agent neve
 │ ✗ No ACTIONS_ID_TOKEN_*     │     │ ✓ ACTIONS_ID_TOKEN_REQUEST_URL        │
 │ ✗ No cloud credentials      │     │ ✓ ACTIONS_ID_TOKEN_REQUEST_TOKEN      │
 │ ✗ No API keys               │     │ ✓ AWF_AUTH_TYPE=github-oidc           │
-│ ✓ OPENAI_BASE_URL=          │     │ ✓ AWF_AUTH_PROVIDER=azure|aws|gcp     │
+│ ✓ OPENAI_BASE_URL=          │     │ ✓ AWF_AUTH_PROVIDER=azure|aws|gcp|anthropic │
 │   http://172.30.0.30:10000  │     │ ✓ Provider-specific config            │
 │                             │     │                                       │
 │ Agent sends request:        │     │ On startup:                           │
@@ -614,7 +616,7 @@ AWF moves the entire OIDC exchange into the api-proxy sidecar, so the agent neve
                                                     │
                                                     ▼
                                           Cloud API endpoint
-                                    (Azure OpenAI / AWS Bedrock / GCP Vertex)
+                                    (Azure OpenAI / AWS Bedrock / GCP Vertex / Anthropic)
 ```
 
 ### OIDC token flow: step by step
@@ -641,6 +643,7 @@ The sidecar's token provider (`github-oidc.js`) calls `ACTIONS_ID_TOKEN_REQUEST_
 | Azure | `api://AzureADTokenExchange` | `github-oidc.js` |
 | AWS | `sts.amazonaws.com` | `github-oidc.js` |
 | GCP | Workload Identity Provider resource name | `github-oidc.js` |
+| Anthropic | `https://api.anthropic.com` | `github-oidc.js` |
 
 This step is identical across all providers — only the audience differs.
 
@@ -677,6 +680,14 @@ GitHub JWT  ──►  sts.googleapis.com/v1/token
             ◄──  { accessToken: "ya29...", expireTime: "..." }
 ```
 
+**Anthropic** (`anthropic-oidc-token-provider.js`):
+```
+GitHub JWT  ──►  api.anthropic.com/v1/oauth/token
+                grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer
+                assertion={github_jwt}
+            ◄──  { access_token: "sk-ant-oat01-...", expires_in: 3600 }
+```
+
 #### Step 4: Credential caching and auto-refresh
 
 All token providers cache the exchanged credentials and schedule proactive refresh:
@@ -692,8 +703,9 @@ When the agent sends a request to the sidecar, the provider adapter injects the 
 
 | Provider | Auth injection method |
 |----------|----------------------|
-| Azure | `Authorization: Bearer {azure_ad_token}` |
-| GCP | `Authorization: Bearer {gcp_token}` |
+| Azure | Authorization header |
+| GCP | Authorization header |
+| Anthropic | Authorization header |
 | AWS | SigV4 request signing (method, path, headers, body hash) |
 
 ### Comparison: static keys vs OIDC
@@ -705,7 +717,7 @@ When the agent sends a request to the sidecar, the provider adapter injects the 
 | Agent sees secret | No (api-proxy only) | No (api-proxy only) |
 | GitHub Actions requirement | API key in secrets | `permissions: id-token: write` |
 | Cloud provider setup | Generate API key | Configure trust policy/federation |
-| Supported providers | OpenAI, Anthropic, Copilot, Gemini | Azure OpenAI, AWS Bedrock, GCP Vertex AI |
+| Supported providers | OpenAI, Anthropic, Copilot, Gemini | Azure OpenAI, AWS Bedrock, GCP Vertex AI, Anthropic WIF |
 
 ### Configuration reference
 
@@ -727,6 +739,7 @@ OIDC authentication is configured via `apiProxy.auth` in the AWF config file or 
 | `containers/api-proxy/oidc-token-provider.js` | Azure AD token exchange via workload identity federation |
 | `containers/api-proxy/aws-oidc-token-provider.js` | AWS STS AssumeRoleWithWebIdentity credential exchange |
 | `containers/api-proxy/gcp-oidc-token-provider.js` | GCP STS token exchange + optional SA impersonation |
+| `containers/api-proxy/anthropic-oidc-token-provider.js` | Anthropic OAuth token exchange for workload identity federation |
 | `containers/api-proxy/providers/openai.js` | OpenAI adapter — selects OIDC provider based on `AWF_AUTH_PROVIDER` |
 | `containers/agent/setup-iptables.sh` | iptables rules for api-proxy routing |
 | `containers/agent/entrypoint.sh` | Entrypoint token cleanup, capability drop |
