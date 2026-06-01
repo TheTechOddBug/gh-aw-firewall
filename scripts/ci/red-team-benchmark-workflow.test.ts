@@ -51,6 +51,9 @@ describe('red-team benchmark workflow config', () => {
     expect(source).toContain('Install Claude CLI');
     expect(source).toContain('npm install -g @anthropic-ai/claude-code');
 
+    // Codex CLI for red-team/user-task agents
+    expect(source).toContain('Install Codex CLI');
+    expect(source).toContain('npm install --ignore-scripts -g @openai/codex@0.135.0');
     // Build and install AWF from source
     expect(source).toContain('Build and install AWF from source');
     expect(source).toContain('npm run build');
