@@ -142,6 +142,7 @@ describe('mapAwfFileConfigToCliOptions', () => {
     const result = mapAwfFileConfigToCliOptions({
       apiProxy: {
         maxEffectiveTokens: 6000,
+        maxAiCredits: 1.2,
         modelMultipliers: {
           'gpt-4o': 2,
           'claude-sonnet-4': 1.5,
@@ -151,6 +152,7 @@ describe('mapAwfFileConfigToCliOptions', () => {
       },
     });
     expect(result.maxEffectiveTokens).toBe(6000);
+    expect(result.maxAiCredits).toBe(1.2);
     expect(result.effectiveTokenModelMultipliers).toEqual({
       'gpt-4o': 2,
       'claude-sonnet-4': 1.5,
