@@ -5,6 +5,7 @@ import {
   parseDomainList,
   isDomainMatchedByPattern,
   parseDomainWithProtocol,
+  parseUrlPatterns,
 } from './domain-patterns';
 
 const WILDCARD_DOMAIN_CHARS = '[a-zA-Z0-9.-]*';
@@ -485,5 +486,85 @@ describe('isDomainMatchedByPattern', () => {
       expect(isDomainMatchedByPattern({ domain: 'api.github.com', protocol: 'https' }, httpPatterns)).toBe(false);
       expect(isDomainMatchedByPattern({ domain: 'api.github.com', protocol: 'http' }, httpsPatterns)).toBe(false);
     });
+  });
+});
+
+// Pattern constant for the safer URL character class (matches the implementation)
+const URL_CHAR_PATTERN = '[^\\s]*';
+// Pattern for hostname wildcards (cannot match '/')
+const HOST_CHAR_PATTERN = '[^\\s/]*';
+
+describe('parseUrlPatterns', () => {
+  it('should escape regex special characters except wildcards', () => {
+    const patterns = parseUrlPatterns(['https://github.com/user']);
+    expect(patterns).toEqual(['^https://github\\.com/user$']);
+  });
+
+  it('should convert * wildcard to safe regex pattern', () => {
+    const patterns = parseUrlPatterns(['https://github.com/myorg/*']);
+    expect(patterns).toEqual([`^https://github\\.com/myorg/${URL_CHAR_PATTERN}`]);
+  });
+
+  it('should handle multiple wildcards', () => {
+    const patterns = parseUrlPatterns(['https://api-*.example.com/*']);
+    expect(patterns).toEqual([`^https://api-${HOST_CHAR_PATTERN}\\.example\\.com/${URL_CHAR_PATTERN}`]);
+  });
+
+  it('should prevent hostname wildcard from matching path separators', () => {
+    const patterns = parseUrlPatterns(['https://api-*.example.com/path']);
+    const regex = new RegExp(patterns[0]);
+    // Should match valid subdomain variations
+    expect(regex.test('https://api-v1.example.com/path')).toBe(true);
+    expect(regex.test('https://api-staging.example.com/path')).toBe(true);
+    // Should NOT match URLs where the wildcard crosses the host/path boundary
+    expect(regex.test('https://api-evil.attacker.com/.example.com/path')).toBe(false);
+  });
+
+  it('should remove trailing slash for consistency', () => {
+    const patterns = parseUrlPatterns(['https://github.com/']);
+    expect(patterns).toEqual(['^https://github\\.com$']);
+  });
+
+  it('should handle exact match patterns', () => {
+    const patterns = parseUrlPatterns(['https://api.example.com/v1/users']);
+    expect(patterns).toEqual(['^https://api\\.example\\.com/v1/users$']);
+  });
+
+  it('should handle query parameters', () => {
+    const patterns = parseUrlPatterns(['https://api.example.com/v1?key=value']);
+    expect(patterns).toEqual(['^https://api\\.example\\.com/v1\\?key=value$']);
+  });
+
+  it('should escape dots in domain names', () => {
+    const patterns = parseUrlPatterns(['https://sub.domain.example.com/path']);
+    expect(patterns).toEqual(['^https://sub\\.domain\\.example\\.com/path$']);
+  });
+
+  it('should handle multiple patterns', () => {
+    const patterns = parseUrlPatterns([
+      'https://github.com/myorg/*',
+      'https://api.example.com/v1/*',
+    ]);
+    expect(patterns).toHaveLength(2);
+    expect(patterns[0]).toBe(`^https://github\\.com/myorg/${URL_CHAR_PATTERN}`);
+    expect(patterns[1]).toBe(`^https://api\\.example\\.com/v1/${URL_CHAR_PATTERN}`);
+  });
+
+  it('should handle empty array', () => {
+    const patterns = parseUrlPatterns([]);
+    expect(patterns).toEqual([]);
+  });
+
+  it('should anchor patterns correctly for exact matches', () => {
+    const patterns = parseUrlPatterns(['https://github.com/exact']);
+    // Should have both start and end anchors for exact matches
+    expect(patterns[0]).toBe('^https://github\\.com/exact$');
+  });
+
+  it('should not add end anchor for wildcard patterns', () => {
+    const patterns = parseUrlPatterns(['https://github.com/*']);
+    // Should only have start anchor for patterns ending with the URL char pattern
+    expect(patterns[0]).toBe(`^https://github\\.com/${URL_CHAR_PATTERN}`);
+    expect(patterns[0]).not.toContain('$');
   });
 });

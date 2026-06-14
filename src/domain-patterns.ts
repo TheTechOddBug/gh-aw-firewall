@@ -341,3 +341,77 @@ export function isDomainMatchedByPattern(
   }
   return false;
 }
+
+/**
+ * Regex pattern for matching URL path characters.
+ * Uses character class instead of .* to prevent catastrophic backtracking (ReDoS).
+ * Matches any non-whitespace character, which is appropriate for URL paths.
+ */
+const URL_CHAR_PATTERN = '[^\\s]*';
+
+/**
+ * Regex pattern for matching hostname characters.
+ * Unlike URL_CHAR_PATTERN, this does NOT match '/' to prevent hostname wildcards
+ * from crossing the host/path boundary (e.g., `api-*` must not match `/`).
+ */
+const HOST_CHAR_PATTERN = '[^\\s/]*';
+
+/**
+ * Parses URL patterns for SSL Bump ACL rules
+ *
+ * Converts user-friendly URL patterns into Squid url_regex ACL patterns.
+ *
+ * Examples:
+ * - `https://github.com/myorg/*` → `^https://github\.com/myorg/[^\s]*`
+ * - `https://api.example.com/v1/users` → `^https://api\.example\.com/v1/users$`
+ *
+ * @param patterns - Array of URL patterns (can include wildcards)
+ * @returns Array of regex patterns for Squid url_regex ACL
+ */
+export function parseUrlPatterns(patterns: string[]): string[] {
+  return patterns.map(pattern => {
+    // Remove trailing slash for consistency
+    let p = pattern.replace(/\/$/, '');
+
+    // Preserve existing .* patterns by using a placeholder before escaping
+    const WILDCARD_PLACEHOLDER = '\x00WILDCARD\x00';
+    p = p.replace(/\.\*/g, WILDCARD_PLACEHOLDER);
+
+    // Split into host and path portions to apply different wildcard patterns.
+    // Wildcards in hostname must not match '/' to prevent host/path boundary crossing.
+    const schemeMatch = p.match(/^(https?:\/\/)/);
+    const schemeLen = schemeMatch ? schemeMatch[1].length : 0;
+    const firstSlashAfterScheme = p.indexOf('/', schemeLen);
+
+    let hostPart: string;
+    let pathPart: string;
+    if (firstSlashAfterScheme === -1) {
+      hostPart = p;
+      pathPart = '';
+    } else {
+      hostPart = p.slice(0, firstSlashAfterScheme);
+      pathPart = p.slice(firstSlashAfterScheme);
+    }
+
+    // Escape regex special characters except * in each part
+    hostPart = hostPart.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+    pathPart = pathPart.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+
+    // Convert * wildcards: HOST_CHAR_PATTERN for hostname, URL_CHAR_PATTERN for path
+    hostPart = hostPart.replace(/\*/g, HOST_CHAR_PATTERN);
+    pathPart = pathPart.replace(/\*/g, URL_CHAR_PATTERN);
+
+    p = hostPart + pathPart;
+
+    // Restore preserved patterns from placeholder
+    p = p.replace(new RegExp(WILDCARD_PLACEHOLDER, 'g'), URL_CHAR_PATTERN);
+
+    // Anchor the pattern
+    // If pattern ends with a wildcard char pattern, don't add end anchor
+    if (p.endsWith(URL_CHAR_PATTERN) || p.endsWith(HOST_CHAR_PATTERN)) {
+      return `^${p}`;
+    }
+    // For exact matches, add end anchor
+    return `^${p}$`;
+  });
+}
