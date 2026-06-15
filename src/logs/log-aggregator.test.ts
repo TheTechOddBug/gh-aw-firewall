@@ -2,11 +2,13 @@
  * Tests for log-aggregator module
  */
 
-import { aggregateLogs, loadAllLogs, loadAndAggregate } from './log-aggregator';
+import { loadAllLogs, loadAndAggregate, logAggregatorTestHelpers } from './log-aggregator';
 import { ParsedLogEntry, LogSource } from '../types';
 import { createLogEntry, createRawLogLine } from './log-test-fixtures.test-utils';
 import execa from 'execa';
 import * as fs from 'fs';
+
+const { aggregateLogs } = logAggregatorTestHelpers;
 
 // Mock dependencies
 jest.mock('execa');
