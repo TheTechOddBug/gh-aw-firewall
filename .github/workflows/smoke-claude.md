@@ -13,7 +13,7 @@ permissions:
   pull-requests: read
   
 name: Smoke Claude
-max-turns: 2
+max-turns: 1
 engine:
   id: claude
   model: claude-haiku-4-5
@@ -23,7 +23,7 @@ sandbox:
 strict: false
 tools:
   bash:
-    - "*"
+    - bash
   github: false
 safe-outputs:
     threat-detection:
@@ -33,10 +33,8 @@ safe-outputs:
     add-labels:
       allowed: [smoke-claude]
     messages:
-      footer: "> 💥 *[THE END] — Illustrated by [{workflow_name}]({run_url})*"
-      run-started: "💥 **WHOOSH!** [{workflow_name}]({run_url}) springs into action on this {event_type}! *[Panel 1 begins...]*"
-      run-success: "🎬 **THE END** — [{workflow_name}]({run_url}) **MISSION: ACCOMPLISHED!** The hero saves the day! ✨"
-      run-failure: "💫 **TO BE CONTINUED...** [{workflow_name}]({run_url}) {status}! Our hero faces unexpected challenges..."
+      run-success: "✅ [{workflow_name}]({run_url}) passed"
+      run-failure: "❌ [{workflow_name}]({run_url}) {status}"
 timeout-minutes: 10
 steps:
   - name: Create smoke test file
@@ -74,18 +72,23 @@ steps:
     run: |
       cat /tmp/gh-aw/agent/smoke-test-claude-$EXPR_GITHUB_RUN_ID.txt
       echo "File verification: PASS"
-  - name: Export workflow context
+  - name: Compute final smoke result
     env:
       EXPR_GITHUB_EVENT_NAME: ${{ github.event_name }}
-      EXPR_GITHUB_RUN_ID: ${{ github.run_id }}
-      EXPR_b14517fc: ${{ github.event.pull_request.number || '' }}
+      EXPR_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
     run: |
-      cat > /tmp/gh-aw/agent/workflow-context.env << ENVEOF
-      export GITHUB_EVENT_NAME="$EXPR_GITHUB_EVENT_NAME"
-      export GITHUB_RUN_ID="$EXPR_GITHUB_RUN_ID"
-      export PR_NUMBER="$EXPR_b14517fc"
-      ENVEOF
-      echo "Context exported to /tmp/gh-aw/agent/workflow-context.env"
+      API_COUNT=$(jq 'length' /tmp/gh-aw/agent/recent-prs.json)
+      GH_CHECK=$(cat /tmp/gh-aw/agent/smoke-context.txt)
+      [ "$API_COUNT" -ge 2 ] && API_STATUS='✅ PASS' || API_STATUS='❌ FAIL'
+      echo "$GH_CHECK" | grep -q '✅' && CHECK_STATUS='✅ PASS' || CHECK_STATUS='❌ FAIL'
+      FILE_STATUS='✅ PASS'
+      [ "$API_STATUS" = '✅ PASS' ] && [ "$CHECK_STATUS" = '✅ PASS' ] && TOTAL='PASS' || TOTAL='FAIL'
+      jq -n --arg result "$TOTAL" --arg api_status "$API_STATUS" \
+        --arg gh_check "$CHECK_STATUS" --arg file_status "$FILE_STATUS" \
+        --arg pr_number "$EXPR_PR_NUMBER" --arg event "$EXPR_GITHUB_EVENT_NAME" \
+        '{result: $result, api_status: $api_status, gh_check: $gh_check, file_status: $file_status, pr_number: $pr_number, event: $event}' \
+        > /tmp/gh-aw/agent/final-result.json
+      echo "Pre-computed result: $TOTAL (API=$API_STATUS, GH=$CHECK_STATUS, File=$FILE_STATUS)"
 post-steps:
   - name: Validate safe outputs were invoked
     run: |
@@ -107,71 +110,16 @@ post-steps:
     if: always()
     run: |
       TURN_COUNT="${GH_AW_TURN_COUNT:-unknown}"
-      echo "::notice::Smoke test completed in ${TURN_COUNT} turns (target: 1, hard cap: 2)"
+      echo "::notice::Smoke test completed in ${TURN_COUNT} turns (target: 1)"
 ---
 
 # Smoke Test: Claude Engine Validation
 
-Pre-computed data is available:
-- **GitHub API**: Recent PRs in `/tmp/gh-aw/agent/recent-prs.json` (already fetched)
-- **GitHub check**: Already verified in pre-step — read result from `/tmp/gh-aw/agent/smoke-context.txt`
-- **File verify**: `/tmp/gh-aw/agent/smoke-test-claude-${{ github.run_id }}.txt` (already verified in pre-step)
-- **Workflow context**: Source `/tmp/gh-aw/agent/workflow-context.env` for trigger/run variables
+All data is pre-computed. Read `/tmp/gh-aw/agent/final-result.json` (one bash call: `cat /tmp/gh-aw/agent/final-result.json`).
 
-**CRITICAL — Single Response Execution:**
-This workflow should complete in exactly 1 LLM turn (your first response); `max-turns: 2` is a hard cap for safety.
-All required data exists in pre-created files. There is nothing to explore, investigate, or validate beyond reading the 3 files listed below.
+The JSON contains: `result` (PASS/FAIL), `api_status`, `gh_check`, `file_status`, `event`, `pr_number`.
 
-Steps:
-1. Make ONE bash tool call containing all commands shown below
-2. End your response — task complete
+- If `event` is `pull_request`: call `add_comment` with `item_number` set to `pr_number` and a body listing each check result plus the overall `result`; then call `add_labels` with `["smoke-claude"]` only if `result` is `PASS`.
+- Otherwise: call `noop` with the result summary.
 
-If you find yourself thinking "I should check..." or "Let me verify..." — STOP. The pre-steps already verified everything.
-
-## Expected Commands
-
-Execute these commands in a single bash response:
-
-```bash
-source /tmp/gh-aw/agent/workflow-context.env
-API_COUNT=$(jq 'length' /tmp/gh-aw/agent/recent-prs.json)
-GH_CHECK=$(cat /tmp/gh-aw/agent/smoke-context.txt)
-cat /tmp/gh-aw/agent/smoke-test-claude-${GITHUB_RUN_ID}.txt
-
-[ "$API_COUNT" -ge 2 ] && API_STATUS='✅ PASS' || API_STATUS='❌ FAIL'
-echo "$GH_CHECK" | grep -q '✅' && CHECK_STATUS='✅ PASS' || CHECK_STATUS='❌ FAIL'
-FILE_STATUS='✅ PASS'
-[ "$API_STATUS" = '✅ PASS' ] && [ "$CHECK_STATUS" = '✅ PASS' ] && TOTAL='PASS' || TOTAL='FAIL'
-
-if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-  printf '{"issue_number":%s,"body":"GitHub API: %s\nGitHub check: %s\nFile verify: %s\n\n**Total: %s**"}' \
-    "$PR_NUMBER" "$API_STATUS" "$CHECK_STATUS" "$FILE_STATUS" "$TOTAL" \
-    > /tmp/gh-aw/agent/result.json
-  safeoutputs add_comment . < /tmp/gh-aw/agent/result.json
-  if [ "$TOTAL" = "PASS" ]; then
-    printf '{"issue_number":%s,"labels":["smoke-claude"]}' "$PR_NUMBER" \
-      > /tmp/gh-aw/agent/labels.json
-    safeoutputs add_labels . < /tmp/gh-aw/agent/labels.json
-  fi
-else
-  safeoutputs noop --message "Smoke test: $TOTAL"
-fi
-```
-
-Do not explore, validate, or make additional checks. All data is pre-verified.
-
-Your tasks (1 line per result):
-1. **GitHub API**: Count entries in `/tmp/gh-aw/agent/recent-prs.json` (PASS if ≥ 2)
-2. **GitHub check**: Read `/tmp/gh-aw/agent/smoke-context.txt` and report actual `playwright_check` result (PASS if ✅, FAIL if ❌)
-3. **File verify**: Confirm file exists at `/tmp/gh-aw/agent/smoke-test-claude-${{ github.run_id }}.txt`
-
-Call safe-outputs immediately after these 3 reads.
-- Use the `safeoutputs` CLI (`add_comment`, `add_labels`, `noop`) with real arguments.
-- Do NOT call the `mcp__safeoutputs` MCP tools directly — use only the bash `safeoutputs` CLI command.
-- Do not use pipe-to-stdin for safeoutputs JSON payloads. Write JSON to `/tmp/gh-aw/agent/*.json` and pass it with input redirection (`safeoutputs <tool> . < /tmp/gh-aw/agent/<file>.json`).
-- Never call `add_comment` or `add_labels` with empty arguments. If you're not ready to send final output, call `noop` with a short message.
-
-**If triggered by pull request**: add a comment with actual ✅/❌ per test and PASS/FAIL total; only add label `smoke-claude` when all checks pass.
-**If not triggered by pull request**: use noop to report results.
-
-After calling safeoutputs, stop immediately. Do NOT produce a text summary turn.
+After calling safeoutputs, stop immediately.
