@@ -381,6 +381,18 @@ interface DockerService {
  */
 interface DockerNetwork {
   /**
+   * Explicit network name.
+   *
+   * When set, Docker Compose uses this exact name instead of the default
+   * `<project>_<key>` form. Used by network-isolation (topology) mode to pin the
+   * internal network to a deterministic name so externally-launched trusted
+   * containers can be attached with `docker network connect <name>`.
+   *
+   * @example 'awf-net'
+   */
+  name?: string;
+
+  /**
    * Network driver to use
    * 
    * The 'bridge' driver creates a private network on the host.
@@ -403,6 +415,17 @@ interface DockerNetwork {
     /** Array of subnet configurations */
     config: Array<{ subnet: string }>;
   };
+
+  /**
+   * Whether this network is internal (no external/internet connectivity)
+   *
+   * When true, Docker does not provide a default gateway route to the internet
+   * for members of this network. Used by network-isolation (topology) mode so
+   * the agent container has no egress path except through the dual-homed proxy.
+   *
+   * @default false
+   */
+  internal?: boolean;
 
   /**
    * Whether this network is externally managed

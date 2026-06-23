@@ -84,6 +84,43 @@ export interface NetworkOptions {
   enableHostAccess?: boolean;
 
   /**
+   * Enable network-isolation (topology) enforcement instead of iptables.
+   *
+   * **Experimental.** When true, AWF enforces egress containment purely through
+   * Docker network topology rather than host/container iptables: the agent (and
+   * any sidecars) run on an `internal` Docker network with no route to the
+   * internet, and the Squid proxy is dual-homed (attached to both the internal
+   * network and an external bridge network) so it is the sole egress path.
+   *
+   * This mode requires **no NET_ADMIN and no host-level iptables**, so it does
+   * not need `sudo` and works inside environments where privileged networking is
+   * unavailable (e.g. ARC / Kubernetes runner containers using a DinD sidecar).
+   * When enabled, the `awf-iptables-init` container is not created.
+   *
+   * Not yet supported in combination with `--dns-over-https` or
+   * `--enable-host-access`.
+   *
+   * @default false
+   */
+  networkIsolation?: boolean;
+
+  /**
+   * Externally-launched trusted containers to attach to the internal topology
+   * network when `networkIsolation` is enabled.
+   *
+   * Each entry is a Docker container name (or id). After the AWF containers
+   * start, AWF runs `docker network connect awf-net <name>` for each, so the
+   * agent can reach these trusted services (e.g. an mcp-gateway or DIFC proxy
+   * launched by the surrounding workflow) over the internal network without
+   * granting them their own egress path.
+   *
+   * Only meaningful together with `networkIsolation`.
+   *
+   * @default undefined
+   */
+  topologyAttach?: string[];
+
+  /**
    * Whether the localhost keyword was detected in --allow-domains.
    *
    * When true, localhost inside the container resolves to the host machine's
