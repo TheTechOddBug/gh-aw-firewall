@@ -70,3 +70,7 @@ jobs:
           cd containers/cli-proxy
           npm ci
           npm test
+
+      - name: Run shell unit tests
+        if: matrix.node-version == '20'
+        run: bash tests/setup-iptables-port-spec.test.sh
