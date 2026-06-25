@@ -2,7 +2,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import execa from 'execa';
+import { getSafeHostGid, getSafeHostUid } from './host-identity';
+import { buildRuntimeImageRef, parseImageTag } from './image-tag';
 import { logger } from './logger';
+import { applyHostPathPrefixToVolumes } from './services/host-path-prefix';
+import { getLocalDockerEnv } from './docker-host';
 
 /**
  * Copies the iptables audit dump from the init-signal volume to the audit directory.
@@ -59,7 +63,7 @@ function preserveDirectory({
         execa.sync('chmod', ['-R', 'a+rX', targetDir]);
         logger.info(`${availableLabel} available at: ${targetDir}`);
       } catch (error) {
-        logger.debug(permissionErrorMessage, error);
+        logger.warn(permissionErrorMessage, error);
       }
     }
     return;
@@ -84,11 +88,92 @@ type PreserveCleanupArtifactsOptions = {
   proxyLogsDir?: string;
   auditDir?: string;
   sessionStateDir?: string;
+  dockerHostPathPrefix?: string;
+  imageRegistry?: string;
+  imageTag?: string;
+  agentImage?: string;
 };
+
+function resolvePermFixerImageRef(imageRegistry?: string, imageTag?: string, agentImage?: string): string {
+  try {
+    const registry = imageRegistry || 'ghcr.io/github/gh-aw-firewall';
+    const parsedImageTag = parseImageTag(imageTag || 'latest');
+    const imageName = agentImage === 'act' ? 'agent-act' : 'agent';
+    return buildRuntimeImageRef(registry, imageName, parsedImageTag);
+  } catch {
+    return 'ghcr.io/github/gh-aw-firewall/agent:latest';
+  }
+}
+
+function fixArtifactPermissionsForRootless(
+  dirs: Array<string | undefined>,
+  dockerHostPathPrefix: string | undefined,
+  imageRegistry: string | undefined,
+  imageTag: string | undefined,
+  agentImage: string | undefined,
+): void {
+  const currentUid = process.getuid?.();
+  if (currentUid === undefined || currentUid === 0) {
+    return;
+  }
+
+  const existingDirs = dirs.filter(
+    (dir): dir is string => typeof dir === 'string' && dir.length > 0 && fs.existsSync(dir),
+  );
+  if (existingDirs.length === 0) {
+    return;
+  }
+
+  const uid = getSafeHostUid();
+  const gid = getSafeHostGid();
+  const imageRef = resolvePermFixerImageRef(imageRegistry, imageTag, agentImage);
+
+  for (const dir of existingDirs) {
+    const mount = applyHostPathPrefixToVolumes([`${path.resolve(dir)}:/fix:rw`], dockerHostPathPrefix)[0];
+    try {
+      const result = execa.sync(
+        'docker',
+        [
+          'run',
+          '--rm',
+          '--pull',
+          'never',
+          '--network',
+          'none',
+          '--cap-drop',
+          'ALL',
+          '--cap-add',
+          'CHOWN',
+          '--cap-add',
+          'DAC_OVERRIDE',
+          '--cap-add',
+          'FOWNER',
+          '-e',
+          `TUID=${uid}`,
+          '-e',
+          `TGID=${gid}`,
+          '-v',
+          mount,
+          imageRef,
+          'sh',
+          '-c',
+          'chown -R "$TUID:$TGID" /fix && chmod -R a+rX /fix',
+        ],
+        { env: getLocalDockerEnv(), reject: false },
+      );
+
+      if (typeof result.exitCode === 'number' && result.exitCode !== 0) {
+        logger.warn(`Rootless artifact permission repair failed for ${dir} (exit ${result.exitCode})`);
+      }
+    } catch (error) {
+      logger.warn(`Rootless artifact permission repair failed for ${dir}:`, error);
+    }
+  }
+}
 
 export function preserveCleanupArtifacts(
   workDir: string,
-  { proxyLogsDir, auditDir, sessionStateDir }: PreserveCleanupArtifactsOptions = {},
+  { proxyLogsDir, auditDir, sessionStateDir, dockerHostPathPrefix, imageRegistry, imageTag, agentImage }: PreserveCleanupArtifactsOptions = {},
 ): void {
   const timestamp = path.basename(workDir).replace('awf-', '');
   const agentLogsDestination = path.join(os.tmpdir(), `awf-agent-logs-${timestamp}`);
@@ -160,7 +245,7 @@ export function preserveCleanupArtifacts(
         execa.sync('chmod', ['-R', 'a+rX', auditDir]);
         logger.info(`Audit artifacts available at: ${auditDir}`);
       } catch (error) {
-        logger.debug('Could not fix audit dir permissions:', error);
+        logger.warn('Could not fix audit dir permissions as non-root user; rootless repair will be attempted:', error);
       }
     }
   } else {
@@ -205,6 +290,14 @@ export function preserveCleanupArtifacts(
       }
     }
   }
+
+  fixArtifactPermissionsForRootless(
+    [proxyLogsDir, auditDir, sessionStateDir],
+    dockerHostPathPrefix,
+    imageRegistry,
+    imageTag,
+    agentImage,
+  );
 }
 
 export function removeWorkDirectories(workDir: string): void {
