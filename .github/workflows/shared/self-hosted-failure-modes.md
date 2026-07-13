@@ -72,6 +72,7 @@ Establish these facts before matching a failure mode:
 | D2 | cli-proxy fails on IPv6-enabled runners | The tunnel was bound only to `127.0.0.1` | Fixed by dual-stack binding | Check `ss -tlnp` inside `awf-cli-proxy` | #4626 |
 | D3 | `--enable-dind` still exists after DinD removal | Legacy flag cleanup is incomplete | Known unresolved cleanup item | `awf --help | grep enable-dind` | #1727 |
 | D4 | Enterprise LLM gateway needs an injected auth header | API proxy lacks a user extension point for that hop | Known unresolved proposal | No general probe; capture the required header flow in the report | #4849 |
+| D5 | gVisor install step exits with `HTTP 404` / download failure; `runsc` binary not found; AWF exits with `runtime 'gvisor' is not available` or compose up fails immediately after `--container-runtime gvisor` | The `gh-aw`-compiler-generated gVisor install step (or smoke-test lock files) pins a specific gVisor release tag (e.g. `20250623.0`); if that artifact is no longer available from `storage.googleapis.com`, the download returns 404 | Manually update the affected generated `.lock.yml` install step to a currently available release (for example, `20250707.0`), or upgrade to a `gh-aw` release containing the corresponding `DefaultGVisorVersion` update and recompile. PR github/gh-aw-firewall#6143 only patched this repository's four smoke-test lock files; it did not add an AWF configuration option or release an AWF fix. | `ARCH=$(uname -m); curl -sI https://storage.googleapis.com/gvisor/releases/release/20250623.0/${ARCH}/runsc` — HTTP 404 confirms the pinned artifact is unavailable; replace the tag with an available release and retry | github/gh-aw-firewall#6143 |
 
 ## Error-string quick lookup
 
@@ -102,6 +103,7 @@ Establish these facts before matching a failure mode:
 | `getent passwd <UID>` fails or `HOME=/`, `USER=root` in chroot | A6 |
 | Bind-mounted `/tmp/...` files are missing inside DinD containers | A1 |
 | `diagnosis=unknown` from `awf-cli-proxy` DIFC probe (proxy reachable, no connection error) with `GITHUB_SERVER_URL=*.ghe.com`, or `diagnosis=reachable-but-api-error (HTTP NNN)` | C7 |
+| `HTTP 404` / `404 Not Found` downloading `runsc` from `storage.googleapis.com` during gVisor install | D5 |
 
 ## Known unresolved items
 
