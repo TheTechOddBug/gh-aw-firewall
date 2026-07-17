@@ -129,6 +129,48 @@ if (config.containerRuntime) {
 }
 ```
 
+### Volume mounting & filesystem access (the Gofer)
+
+gVisor uses AWF's **standard compose agent** — the same service definition as the
+default Docker runtime, only with `runtime: runsc`. So the *mount set is
+identical to default Docker mode*: AWF applies selective bind mounts under
+`/host` (see `src/services/agent-volumes/system-mounts.ts`) and the agent
+`chroot`s into `/host` before running:
+
+- `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/opt`, `/sys`, `/dev` → `/host/*`
+  read-only (system libraries and toolchains come from the host, unlike sbx).
+- `<workspaceDir>` → `/host<workspaceDir>` read-write; `/tmp` → `/host/tmp`
+  read-write.
+- When `chroot.binariesSourcePath` is configured, that tool directory is additionally
+  mounted at **`/host/tmp/awf-runner-bin`** (ro), and `entrypoint.sh` prepends it
+  to `PATH`. This is especially useful for DinD/ARC staged filesystems where the
+  runner-installed binaries are not present in the mounted `/usr` tree.
+- An empty home volume exposes only whitelisted `$HOME` subdirs; select `/etc`
+  files (SSL certs, `passwd`, `group`, `hosts`, …) are mounted individually.
+
+The gVisor-specific twist is **how those mounts are accessed**. A `runsc`
+sandbox uses a separate host-side **Gofer** process to mediate path-based
+filesystem operations over LISAFS. With directfs (enabled by default in current
+`runsc`), the Gofer can pass an opened host file descriptor to the Sentry, which
+then performs data I/O directly and avoids repeated Gofer round trips. (9P was
+the legacy Sentry-Gofer protocol.) Practical consequences:
+
+- **Isolation:** the sandbox is restricted to the filesystem tree assembled for
+  it; the Gofer controls path resolution and opening, while directfs constrains
+  subsequent access to the descriptors it passes to the Sentry.
+- **Compatibility:** filesystem behavior still follows gVisor's implementation;
+  operations such as some `mmap` sharing and exotic `ioctl`s can differ from a
+  native bind mount. This is the filesystem analogue of the syscall shims noted
+  below and should be validated when a tool works in Docker but not under gVisor.
+
+:::note
+Because gVisor reuses the compose agent, there is **no sbx-style host-path ==
+guest-path** behavior here: the agent sees files under `/host` (pre-chroot) and
+at their normal paths (post-chroot), exactly as in default Docker mode. A new
+compose-model runtime inherits this mount set for free; a new *microVM* runtime
+(like sbx) must define its own sharing scheme instead.
+:::
+
 ### The netstack DNS problem (and the fix)
 
 gVisor's userspace netstack has an isolated sandbox loopback that **cannot reach
