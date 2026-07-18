@@ -26,7 +26,8 @@ import execa from 'execa';
 import * as fs from 'fs';
 import * as path from 'path';
 import { logger } from './logger';
-import { HOME_TOOL_SUBDIRS, CREDENTIAL_PATHS_BY_PARENT } from './services/agent-volumes/home-whitelist';
+import { HOME_TOOL_SUBDIRS } from './services/agent-volumes/home-whitelist';
+import { credentialEntriesUnderMountedParents } from './config/mount-policy';
 
 /** Name prefix for AWF-managed sandboxes. */
 const SBX_NAME_PREFIX = 'awf-agent';
@@ -108,42 +109,38 @@ let credentialBackupRoot: string | undefined;
  * moved (not deleted) to a backup dir at the home root — which is NOT one of the
  * mounted subdirs — and restored by {@link restoreHomeCredentials} after the
  * sandbox is torn down. This is the sbx analog of compose mode's `/dev/null`
- * credential overlays.
+ * credential overlays; the credential list comes from the central mount policy
+ * so the two backends can't drift.
  */
 function scrubHomeCredentials(homePath: string): void {
   scrubbedCredentials = [];
   credentialBackupRoot = undefined;
 
-  for (const [parent, names] of Object.entries(CREDENTIAL_PATHS_BY_PARENT)) {
-    const parentPath = path.join(homePath, parent);
-    // Parent isn't mounted (doesn't exist) → nothing nested to hide.
-    if (!fs.existsSync(parentPath)) continue;
+  const mountedParents = new Set<string>(HOME_TOOL_SUBDIRS);
+  for (const entry of credentialEntriesUnderMountedParents(mountedParents)) {
+    const original = path.join(homePath, entry.path);
+    if (!fs.existsSync(original)) continue;
 
-    for (const name of names) {
-      const original = path.join(parentPath, name);
-      if (!fs.existsSync(original)) continue;
-
-      if (!credentialBackupRoot) {
-        // A dotted dir at the home ROOT is never in the mounted subdir set, so
-        // the backup itself can't leak into the VM.
-        credentialBackupRoot = path.join(homePath, `.awf-sbx-cred-backup-${process.pid}`);
-        try {
-          fs.mkdirSync(credentialBackupRoot, { recursive: true });
-        } catch (err) {
-          logger.warn(`[sbx] Could not create credential backup dir: ${(err as Error).message}`);
-          credentialBackupRoot = undefined;
-          return;
-        }
-      }
-
-      const backup = path.join(credentialBackupRoot, `${parent}__${name}`.replace(/\//g, '_'));
+    if (!credentialBackupRoot) {
+      // A dotted dir at the home ROOT is never in the mounted subdir set, so
+      // the backup itself can't leak into the VM.
+      credentialBackupRoot = path.join(homePath, `.awf-sbx-cred-backup-${process.pid}`);
       try {
-        fs.renameSync(original, backup);
-        scrubbedCredentials.push({ original, backup });
-        logger.info(`[sbx] Hid credential path from sandbox: ${parent}/${name}`);
+        fs.mkdirSync(credentialBackupRoot, { recursive: true });
       } catch (err) {
-        logger.warn(`[sbx] Could not hide credential path ${original}: ${(err as Error).message}`);
+        logger.warn(`[sbx] Could not create credential backup dir: ${(err as Error).message}`);
+        credentialBackupRoot = undefined;
+        return;
       }
+    }
+
+    const backup = path.join(credentialBackupRoot, entry.path.replace(/\//g, '__'));
+    try {
+      fs.renameSync(original, backup);
+      scrubbedCredentials.push({ original, backup });
+      logger.info(`[sbx] Hid credential path from sandbox: ${entry.path}`);
+    } catch (err) {
+      logger.warn(`[sbx] Could not hide credential path ${original}: ${(err as Error).message}`);
     }
   }
 
@@ -259,9 +256,9 @@ export async function createSandbox(config: SbxConfig): Promise<string> {
   // positional (host path == guest path) and cannot express the per-file
   // /dev/null credential overlays that compose mode uses (see
   // credential-hiding.ts), so the only way to keep host secrets out of the VM
-  // is to curate which $HOME subdirs are mounted. We share the same whitelist
-  // as the compose chroot home strategy (HOME_TOOL_SUBDIRS) plus the agent
-  // state dirs (.copilot, .gemini). Credential stores such as ~/.aws, ~/.ssh,
+  // is to curate which $HOME subdirs are mounted. The central mount policy
+  // (HOME_TOOL_SUBDIRS) lists the allowed tool-state dirs including agent-state
+  // dirs (.copilot, .gemini). Credential stores such as ~/.aws, ~/.ssh,
   // ~/.docker, ~/.kube, ~/.azure, ~/.gnupg, ~/.netrc and ~/.gitconfig are never
   // whitelisted, so they never enter the sandbox. Only paths that exist on the
   // host are mounted, because sbx requires the mount source to exist.
@@ -276,8 +273,7 @@ export async function createSandbox(config: SbxConfig): Promise<string> {
   // scrubHomeCredentials below) and restored after teardown, so the benign tool
   // state stays available while the secrets never enter the microVM.
   const homePath = process.env.HOME || '/home/runner';
-  const homeSubdirs = ['.copilot', ...HOME_TOOL_SUBDIRS, '.gemini'];
-  for (const subdir of homeSubdirs) {
+  for (const subdir of HOME_TOOL_SUBDIRS) {
     const hostSubdir = `${homePath}/${subdir}`;
     if (seenPaths.has(hostSubdir)) continue;
     if (!fs.existsSync(hostSubdir)) continue;

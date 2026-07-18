@@ -44,11 +44,9 @@ function buildToolDirectoryMounts(params: HomeMountsParams): string[] {
   mounts.push(`${agentLogsPath}:/host${effectiveHome}/.copilot/logs:rw`);
 
   for (const subdir of HOME_TOOL_SUBDIRS) {
+    if (subdir === '.copilot') continue; // handled specially above (existence check + session-state/logs sub-mounts)
+    if (subdir === '.gemini' && !config.geminiApiKey && !config.googleApiKey) continue; // only mount when Gemini/Vertex credentials are present
     mounts.push(`${effectiveHome}/${subdir}:/host${effectiveHome}/${subdir}:rw`);
-  }
-
-  if (config.geminiApiKey || config.googleApiKey) {
-    mounts.push(`${effectiveHome}/.gemini:/host${effectiveHome}/.gemini:rw`);
   }
 
   const runnerToolCacheDir = resolveRunnerToolCachePath(config, effectiveHome);
