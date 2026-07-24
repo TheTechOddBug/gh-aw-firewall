@@ -32,6 +32,9 @@ name: Supply Chain Scan
 
 on:
   pull_request:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -67,6 +70,46 @@ jobs:
       - name: Authenticate to GHCR for image scanning
         run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
+      # Persist Grype's vulnerability DB across runs. The unique run_id key never
+      # hits exactly, so each run restores the newest prior DB via restore-keys,
+      # refreshes it if a newer DB exists (see `db update` below), then saves the
+      # result under a fresh key. This keeps the DB current while avoiding a full
+      # cold download on every run.
+      #
+      # Using separate restore + save steps so the DB is saved immediately after
+      # a successful warm-up regardless of whether later Grype scans flag CVEs
+      # (Grype exits nonzero on --fail-on high findings, which would prevent the
+      # combined actions/cache post-step from uploading the warmed DB).
+      - name: Restore Grype vulnerability DB cache
+        id: grype-cache-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/grype-db
+          key: grype-db-v6-${{ github.run_id }}
+          restore-keys: |
+            grype-db-v6-
+
+      - name: Warm Grype vulnerability DB
+        env:
+          GRYPE_DB: ${{ runner.temp }}/grype-db
+        run: |
+          mkdir -p "$GRYPE_DB"
+          # Warm (or refresh) the vulnerability DB exactly once. Without a shared
+          # cache, every per-image `docker run --rm` would re-download the full DB
+          # (~1 min each), which is the dominant cost of this job.
+          docker run --rm \
+            -v "$GRYPE_DB:/cache" \
+            -e GRYPE_DB_CACHE_DIR=/cache \
+            anchore/grype@sha256:fd4ab4d1042b522c896e73bdf09ab8bf384fa417df99d6dd0d6e1008c7e7c821 \
+            db update
+
+      - name: Save Grype vulnerability DB cache
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/grype-db
+          key: grype-db-v6-${{ github.run_id }}
+
       - name: Scan published & third-party images for CVEs (report-only, Grype v0.116.0)
         # Scans the immutable image digests recorded in the compiled .lock.yml
         # gh-aw-manifest headers: already-published first-party images plus
@@ -74,6 +117,8 @@ jobs:
         # REPORTED as warnings but do NOT fail the job. The blocking CVE gate is
         # the "Build and scan PR container images" step below.
         # anchore/grype@sha256:fd4ab4d1042b522c896e73bdf09ab8bf384fa417df99d6dd0d6e1008c7e7c821 = v0.116.0
+        env:
+          GRYPE_DB: ${{ runner.temp }}/grype-db
         run: |
           python3 - <<'PYEOF'
           import json, os, re, glob, subprocess, sys
@@ -84,6 +129,7 @@ jobs:
                   for c in json.loads(m.group(1)).get('containers', []):
                       images.add(c.get('pinned_image', c.get('image')))
           home = os.path.expanduser('~')
+          db_cache = os.environ['GRYPE_DB']
           cwd = os.getcwd()
           flagged = []
           for image in sorted(images):
@@ -91,6 +137,10 @@ jobs:
               r = subprocess.run([
                   'docker', 'run', '--rm',
                   '-v', f'{home}/.docker/config.json:/root/.docker/config.json:ro',
+                  '-v', f'{db_cache}:/cache',
+                  '-e', 'GRYPE_DB_CACHE_DIR=/cache',
+                  '-e', 'GRYPE_DB_AUTO_UPDATE=false',
+                  '-e', 'GRYPE_CHECK_FOR_APP_UPDATE=false',
                   '-v', f'{cwd}/.grype.yaml:/root/.grype.yaml:ro',
                   'anchore/grype@sha256:fd4ab4d1042b522c896e73bdf09ab8bf384fa417df99d6dd0d6e1008c7e7c821',
                   f'registry:{image}', '--fail-on', 'high',
@@ -111,10 +161,13 @@ jobs:
         # and scans them with --fail-on high. This is the BLOCKING supply-chain
         # gate: it is the only scan that reflects the CVE fixes in a PR, so a
         # High/Critical finding here fails the job.
+        env:
+          GRYPE_DB: ${{ runner.temp }}/grype-db
         run: |
           python3 - <<'PYEOF'
           import os, subprocess, sys
           cwd = os.getcwd()
+          db_cache = os.environ['GRYPE_DB']
           containers = [
               ('agent',     'containers/agent'),
               ('api-proxy', 'containers/api-proxy'),
@@ -136,6 +189,10 @@ jobs:
               r = subprocess.run([
                   'docker', 'run', '--rm',
                   '-v', f'{tar}:{tar}:ro',
+                  '-v', f'{db_cache}:/cache',
+                  '-e', 'GRYPE_DB_CACHE_DIR=/cache',
+                  '-e', 'GRYPE_DB_AUTO_UPDATE=false',
+                  '-e', 'GRYPE_CHECK_FOR_APP_UPDATE=false',
                   '-v', f'{cwd}/.grype.yaml:/root/.grype.yaml:ro',
                   'anchore/grype@sha256:fd4ab4d1042b522c896e73bdf09ab8bf384fa417df99d6dd0d6e1008c7e7c821',
                   f'docker-archive:{tar}', '--fail-on', 'high',
